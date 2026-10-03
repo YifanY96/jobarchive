@@ -1,0 +1,31 @@
+# Personal application records, submitted documents, mail and credentials
+/data/
+*.sqlite3
+*.sqlite3-*
+*.db
+*.dpapi
+credentials*.json
+client_secret*.json
+.env
+.env.*
+
+# Desktop runtime and generated downloads
+/_internal/
+/*.exe
+/*.zip
+/app.ico
+/界面示例.jpg
+/build/
+/dist/
+*.spec
+*.log
+
+# Local Python environments and editor files
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
