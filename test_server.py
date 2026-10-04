@@ -22,6 +22,48 @@ class ArchiveTests(unittest.TestCase):
             z.writestr('records.json',json.dumps({'format':'jobarchive','version':1,'tables':{t:self.store.all(t) for t in s.TABLES}}));z.writestr('../outside','bad')
         with self.assertRaises(ValueError):self.store.restore(out.getvalue())
         self.assertEqual(self.store.application(a['id'])['company'],'测试公司')
+    def test_preferences_survive_reopening_without_changing_records(self):
+        a=self.store.save(self.payload()); before=self.store.all('applications')
+        self.assertEqual(self.store.preferences(),{'language':'zh-CN'})
+        self.store.save_preferences({'language':'en'})
+        reopened=s.Archive(self.tmp.name)
+        self.assertEqual(reopened.preferences(),{'language':'en'})
+        self.assertEqual(reopened.all('applications'),before)
+        with self.assertRaises(ValueError):reopened.save_preferences({'language':'unsupported'})
+        self.assertEqual(reopened.preferences(),{'language':'en'})
+        reopened.restore(reopened.backup())
+        self.assertEqual(reopened.preferences(),{'language':'en'})
+    def test_quick_status_preserves_documents_and_fields(self):
+        p=self.payload();p['new_letter']='Original letter';a=self.store.save(p)
+        original=self.store.application(a['id'])
+        updated=self.store.update_status(a['id'],'面试')
+        self.assertEqual(updated['status'],'面试')
+        for field in ('company','title','jd','notes','url','applied_date','documents'):
+            self.assertEqual(updated[field],original[field])
+        self.assertEqual(len(updated['history']),2)
+        self.assertEqual(len(self.store.update_status(a['id'],'面试')['history']),2)
+        with self.assertRaises(ValueError):self.store.update_status(a['id'],'Interview')
+        self.assertEqual(self.store.application(a['id'])['status'],'面试')
+    def test_localized_http_csv_and_status_endpoint(self):
+        http=s.make_server(self.tmp.name);thread=threading.Thread(target=http.serve_forever,daemon=True);thread.start()
+        headers={'X-Archive-Token':http.token,'Content-Type':'application/json'}
+        def post(path,payload):
+            with urlopen(Request(http.origin+path,json.dumps(payload).encode(),headers)) as response:return json.load(response)
+        try:
+            p=self.payload();p['notes']='=not a formula';a=post('/api/applications',p)
+            post('/api/preferences',{'language':'en'})
+            updated=post('/api/applications/'+a['id']+'/status',{'status':'面试'})
+            self.assertEqual(updated['jd'],'原始 JD')
+            with urlopen(Request(http.origin+'/api/csv',headers=headers)) as response:csv=response.read().decode('utf-8-sig')
+            self.assertIn('Company,Job title,Application URL',csv);self.assertIn('Interview',csv)
+            self.assertIn("'=not a formula",csv);self.assertIn('原始 JD',csv)
+            with self.assertRaises(HTTPError) as error:post('/api/applications',{})
+            self.assertEqual(json.load(error.exception)['error'],'Company and job title are required')
+            with self.assertRaises(HTTPError):
+                urlopen(Request(http.origin+'/api/preferences',b'{"language":"zh-CN"}',{'Content-Type':'application/json'}))
+            self.assertEqual(http.store.preferences()['language'],'en')
+            with urlopen(Request(http.origin+'/api/info',headers=headers)) as response:self.assertEqual(json.load(response)['language'],'en')
+        finally:http.shutdown();http.server_close();thread.join()
     def test_jd_and_private_urls(self):
         p=s.extract_jd('<script type="application/ld+json">'+json.dumps({'@type':'JobPosting','title':'Analyst','hiringOrganization':{'name':'Acme'},'description':'<p>Analyze data</p>'})+'</script>')
         self.assertEqual(p['company'],'Acme');self.assertEqual(p['jd'],'Analyze data')

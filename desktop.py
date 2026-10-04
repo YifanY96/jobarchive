@@ -12,19 +12,31 @@ TITLE='职投档案'
 class DesktopAPI:
     def __init__(self,http):
         self._http=http; self._window=None
+    def set_language(self,token):
+        if not isinstance(token,str) or not secrets.compare_digest(token,self._http.token):
+            return {'error':'Please reopen the app'}
+        if self._window.get_current_url()!=self._http.origin+'/':
+            return {'error':'This page is not allowed to change the window'}
+        language=self._http.store.preferences()['language']
+        self._window.set_title(server.translate(TITLE,language))
+        for key,message in {'global.cancel':'取消','global.saveFile':'保存文件','global.openFile':'打开文件'}.items():
+            self._window.localization[key]=server.translate(message,language)
+        return {'ok':True}
     def export(self,token,kind,document_id=''):
         import webview
+        language=self._http.store.preferences()['language']
+        tr=lambda message:server.translate(message,language)
         try:
             if not isinstance(token,str) or not secrets.compare_digest(token,self._http.token):
                 raise ValueError('请重新打开应用')
             if self._window.get_current_url()!=self._http.origin+'/':
                 raise ValueError('当前页面不允许导出')
             if kind=='backup':
-                raw=self._http.store.backup(); name='职投档案_'+date.today().isoformat()+'.zip'; extension='zip'
+                raw=self._http.store.backup(); name=tr(TITLE)+'_'+date.today().isoformat()+'.zip'; extension='zip'
             elif kind=='csv':
                 req=Request(self._http.origin+'/api/csv',headers={'X-Archive-Token':token})
                 with urlopen(req,timeout=30) as response: raw=response.read()
-                name='投递记录_'+date.today().isoformat()+'.csv'; extension='csv'
+                name=('applications_' if language=='en' else '投递记录_')+date.today().isoformat()+'.csv'; extension='csv'
             elif kind=='document' and server.valid_id(document_id):
                 with self._http.store.connect() as c:
                     d=c.execute('SELECT * FROM documents WHERE id=?',(document_id,)).fetchone()
@@ -34,14 +46,14 @@ class DesktopAPI:
                 name=d['name']; extension=Path(name).suffix.lstrip('.')
             else: raise ValueError('无效的导出请求')
             result=self._window.create_file_dialog(webview.FileDialog.SAVE,save_filename=name,
-                file_types=(f'{extension.upper()} 文件 (*.{extension})','所有文件 (*.*)'))
+                file_types=(f'{extension.upper()} (*.{extension})',tr('所有文件 (*.*)')))
             if not result: return {'cancelled':True}
             destination=Path(result[0])
             # Native dialog owns destination selection and overwrite confirmation.
             destination.write_bytes(raw)
             return {'path':str(destination)}
         except Exception as exc:
-            return {'error':str(exc)}
+            return {'error':tr(str(exc))}
 
 
 def claim_instance(data_dir):
@@ -56,7 +68,7 @@ def claim_instance(data_dir):
         user.FindWindowW.argtypes=[ctypes.c_wchar_p,ctypes.c_wchar_p];user.FindWindowW.restype=ctypes.c_void_p
         user.ShowWindow.argtypes=[ctypes.c_void_p,ctypes.c_int]
         user.SetForegroundWindow.argtypes=[ctypes.c_void_p]
-        window=user.FindWindowW(None,TITLE)
+        window=user.FindWindowW(None,TITLE) or user.FindWindowW(None,'JobArchive')
         if window: user.ShowWindow(window,9);user.SetForegroundWindow(window)
         kernel.CloseHandle.argtypes=[ctypes.c_void_p];kernel.CloseHandle(handle)
         return None
@@ -94,8 +106,9 @@ def main():
         webview.settings['ALLOW_DOWNLOADS']=True
         webview.settings['OPEN_EXTERNAL_LINKS_IN_BROWSER']=True
         http=server.make_server(data_dir);http.desktop=True
+        language=http.store.preferences()['language']
         api=DesktopAPI(http)
-        window=webview.create_window(TITLE,http.origin+'/',js_api=api,width=1280,height=860,
+        window=webview.create_window(server.translate(TITLE,language),http.origin+'/',js_api=api,width=1280,height=860,
             min_size=(850,620),background_color='#f6f5f0',text_select=True)
         api._window=window
         active.write_text(json.dumps({'url':http.origin,'token':http.token}),encoding='utf-8')
@@ -108,17 +121,24 @@ def main():
             status.write_text(json.dumps({'pid':os.getpid(),'url':http.origin,'ready':True,'renderer':'edgechromium'},ensure_ascii=False),encoding='utf-8')
             if args.smoke_test:
                 try:
+                    # Wait for asynchronous preferences and application data to render.
+                    import time
+                    deadline=time.monotonic()+15
+                    while window.evaluate_js("document.documentElement.dataset.ready")!='true' and time.monotonic()<deadline:
+                        time.sleep(.1)
                     page=window.evaluate_js("({title:document.title,heading:document.getElementById('page-title').textContent,bridge:typeof window.pywebview.api.export==='function',token:!!document.querySelector('meta[name=archive-token]').content})")
                     req=Request(http.origin+'/api/info',headers={'X-Archive-Token':http.token})
                     with urlopen(req,timeout=5) as r:info=json.load(r)
-                    (data_dir/'smoke-result.json').write_text(json.dumps({'ok':page['heading']=='投递档案' and page['bridge'] and page['token'] and info['desktop'],'page':page,'version':info['version']},ensure_ascii=False),encoding='utf-8')
+                    (data_dir/'smoke-result.json').write_text(json.dumps({'ok':page['heading']==server.translate('投递档案',language) and page['bridge'] and page['token'] and info['desktop'],'page':page,'version':info['version']},ensure_ascii=False),encoding='utf-8')
                 except Exception as exc:
                     (data_dir/'smoke-result.json').write_text(json.dumps({'ok':False,'error':str(exc)},ensure_ascii=False),encoding='utf-8')
                 finally:window.destroy()
         window.events.loaded+=loaded
         # Edge WebView2 is already installed on this computer; no admin installation.
         webview.start(gui='edgechromium',debug=False,private_mode=False,storage_path=str(data_dir/'webview'),
-            localization={'global.quitConfirmation':'确定关闭职投档案？','global.cancel':'取消','global.saveFile':'保存文件','global.openFile':'打开文件'})
+            localization={'global.quitConfirmation':server.translate('确定关闭应用？已保存的档案会保留。',language),
+                'global.cancel':server.translate('取消',language),'global.saveFile':server.translate('保存文件',language),
+                'global.openFile':server.translate('打开文件',language)})
     except Exception:
         traceback.print_exc(file=log);log.flush()
         ctypes.windll.user32.MessageBoxW(None,'应用未能启动。请查看 data/desktop.log。\n需要 Microsoft Edge WebView2 Runtime。',TITLE,16)

@@ -34,6 +34,8 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 ROOT = Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))
+VERSION = '1.2.0'
+TRANSLATIONS = json.loads((ROOT/'web'/'translations.json').read_text(encoding='utf-8-sig'))
 STATUSES = ['待投递', '已投递', '初筛', '笔试', '面试', 'Offer', '已拒绝', '已撤回']
 MAX_FILE = 25 * 1024 * 1024
 MAX_BODY = 80 * 1024 * 1024
@@ -42,6 +44,25 @@ TABLES = ('applications', 'documents', 'history', 'mails')
 LOCK = threading.RLock()
 NOW = lambda: datetime.now(timezone.utc).isoformat(timespec='seconds')
 ID = lambda: str(uuid.uuid4())
+
+
+def translate(message, language='zh-CN'):
+    if language != 'en':
+        return message
+    translated = TRANSLATIONS.get(message)
+    if translated:
+        return translated if isinstance(translated, str) else translated['en']
+    # Preserve third-party diagnostics and user-supplied file names after prefixes.
+    for prefix, english in {
+        '有附件缺失或被修改，无法生成完整备份：':'Missing or modified attachment; cannot create a full backup: ',
+        '附件校验失败：':'Attachment checksum failed: ',
+        'Google 授权未完成：':'Google authorization incomplete: ',
+        'Google 返回 HTTP ':'Google returned HTTP ',
+        '网站返回 HTTP ':'Website returned HTTP ',
+    }.items():
+        if message.startswith(prefix):
+            return english + message[len(prefix):]
+    return message
 
 
 def valid_id(value):
@@ -113,6 +134,36 @@ class Archive:
         c.row_factory = sqlite3.Row
         c.execute('PRAGMA foreign_keys=ON')
         return c
+
+    def preferences(self):
+        # A file in data/ survives random local ports and desktop restarts.
+        try:
+            value = json.loads((self.dir/'preferences.json').read_text(encoding='utf-8'))
+            language = value.get('language', 'zh-CN') if isinstance(value, dict) else 'zh-CN'
+        except (OSError, ValueError):
+            language = 'zh-CN'
+        return {'language': language if language in ('zh-CN', 'en') else 'zh-CN'}
+
+    def save_preferences(self, payload):
+        language = payload.get('language')
+        if language not in ('zh-CN', 'en'):
+            raise ValueError('界面语言无效')
+        with LOCK:
+            target = self.dir/'preferences.json'
+            temporary = target.with_suffix('.tmp')
+            temporary.write_text(json.dumps({'language':language}), encoding='utf-8')
+            temporary.replace(target)
+        return self.preferences()
+
+    def update_status(self, aid, status):
+        if status not in STATUSES:
+            raise ValueError('请选择有效的投递状态')
+        with LOCK:
+            current = self.application(aid)
+            if current['status'] == status:
+                return current
+            current['status'] = status
+            return self.save(current, aid)
 
     def all(self, table):
         if table not in TABLES:
@@ -578,6 +629,11 @@ class Handler(BaseHTTPRequestHandler):
         for k,v in (extra or {}).items(): self.send_header(k,v)
         self.end_headers(); self.wfile.write(raw)
     def json(self,obj,code=200):
+        if isinstance(obj,dict):
+            language = self.server.store.preferences()['language']
+            obj = dict(obj)
+            for key in ('error','warning'):
+                if isinstance(obj.get(key),str): obj[key] = translate(obj[key],language)
         self.send_bytes(json.dumps(obj,ensure_ascii=False).encode(),code=code)
     def guard(self,write=False):
         if self.headers.get('Host') != self.server.authority:
@@ -600,9 +656,12 @@ class Handler(BaseHTTPRequestHandler):
             self.guard()
             path=urlsplit(self.path).path; args=parse_qs(urlsplit(self.path).query)
             store=self.server.store
+            language=store.preferences()['language']
             if path=='/oauth/callback':
                 self.server.gmail.callback(args)
-                self.send_bytes('<!doctype html><meta charset="utf-8"><title>Gmail 已连接</title><p>Gmail 已连接。可以关闭此页，回到职投档案刷新邮箱状态。</p>'.encode(),'text/html; charset=utf-8'); return
+                page='<!doctype html><meta charset="utf-8"><title>'+translate('Gmail 已连接',language)+'</title><p>'+translate('Gmail 已连接。可以关闭此页，回到职投档案刷新邮箱状态。',language)+'</p>'
+                self.send_bytes(page.encode(),'text/html; charset=utf-8'); return
+            if path=='/api/preferences': self.json(store.preferences()); return
             if path=='/api/session': self.json({'token':self.server.token,'statuses':STATUSES}); return
             if path=='/api/applications': self.json(store.all('applications')); return
             if path.startswith('/api/applications/'):
@@ -610,15 +669,16 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/mails': self.json(sorted(store.all('mails'),key=lambda x:x['received_at'],reverse=True)); return
             if path=='/api/gmail': self.json(self.server.gmail.status()); return
             if path=='/api/info':
-                self.json({'data_dir':str(store.dir),'version':'1.1.0','desktop':getattr(self.server,'desktop',False),'gmail':self.server.gmail.status()}); return
+                self.json({'data_dir':str(store.dir),'version':VERSION,'language':language,'desktop':getattr(self.server,'desktop',False),'gmail':self.server.gmail.status()}); return
             if path=='/api/backup':
                 self.send_bytes(store.backup(),'application/zip',extra={'Content-Disposition':
                     'attachment; filename="JobArchive-'+date.today().isoformat()+'.zip"'}); return
             if path=='/api/csv':
                 out=io.StringIO(newline=''); w=csv.writer(out)
                 fields=['company','title','url','applied_date','status','notes','jd']
-                w.writerow(['公司','职位','投递网页','投递日期','状态','备注','职位描述'])
+                w.writerow([translate(label,language) for label in ['公司','职位','投递网页','投递日期','状态','备注','职位描述']])
                 for row in store.all('applications'):
+                    row['status']=translate(row['status'],language)
                     w.writerow([("'"+str(row[k]) if str(row[k]).lstrip().startswith(('=','+','-','@')) else row[k]) for k in fields])
                 self.send_bytes(out.getvalue().encode('utf-8-sig'),'text/csv; charset=utf-8',extra={
                     'Content-Disposition':'attachment; filename="applications.csv"'}); return
@@ -631,7 +691,7 @@ class Handler(BaseHTTPRequestHandler):
                 if hashlib.sha256(raw).hexdigest()!=r['sha256']: raise ValueError('附件校验失败，请使用备份恢复')
                 self.send_bytes(raw,'application/octet-stream',extra={
                     'Content-Disposition':"attachment; filename*=UTF-8''"+quote(r['name'],safe='')}); return
-            assets={'/':'index.html','/app.js':'app.js','/style.css':'style.css','/favicon.svg':'favicon.svg'}
+            assets={'/':'index.html','/app.js':'app.js','/style.css':'style.css','/favicon.svg':'favicon.svg','/translations.json':'translations.json'}
             if path not in assets: self.json({'error':'页面不存在'},404); return
             asset=ROOT/'web'/assets[path]
             raw=asset.read_bytes()
@@ -640,7 +700,8 @@ class Handler(BaseHTTPRequestHandler):
         except PermissionError as exc: self.json({'error':str(exc)},403)
         except (ValueError,KeyError,OSError,sqlite3.Error) as exc:
             if urlsplit(self.path).path=='/oauth/callback':
-                self.send_bytes(('<!doctype html><meta charset="utf-8"><p>授权未完成：'+html.escape(str(exc))+'</p><p>回到职投档案重新连接。</p>').encode(),'text/html; charset=utf-8',400)
+                language=self.server.store.preferences()['language']
+                self.send_bytes(('<!doctype html><meta charset="utf-8"><p>'+translate('授权未完成：',language)+html.escape(translate(str(exc),language))+'</p><p>'+translate('回到职投档案重新连接。',language)+'</p>').encode(),'text/html; charset=utf-8',400)
             else: self.json({'error':str(exc)},400)
     def do_POST(self):
         try:
@@ -651,10 +712,13 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('请确认恢复，备份上限为 400 MB')
                 self.json(store.restore(self.rfile.read(size))); return
             p=self.body()
+            if path=='/api/preferences': self.json(store.save_preferences(p)); return
             if path=='/api/shutdown':
                 self.json({'ok':True})
                 threading.Thread(target=self.server.shutdown,daemon=True).start(); return
             if path=='/api/applications': self.json(store.save(p)); return
+            if path.startswith('/api/applications/') and path.endswith('/status'):
+                self.json(store.update_status(path.split('/')[-2],p.get('status'))); return
             if path.startswith('/api/applications/'):
                 self.json(store.save(p,path.rsplit('/',1)[1])); return
             if path=='/api/fetch-jd': self.json(fetch_jd(text(p.get('url',''),4000))); return
