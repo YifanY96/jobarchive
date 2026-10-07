@@ -22,6 +22,60 @@ class ArchiveTests(unittest.TestCase):
             z.writestr('records.json',json.dumps({'format':'jobarchive','version':1,'tables':{t:self.store.all(t) for t in s.TABLES}}));z.writestr('../outside','bad')
         with self.assertRaises(ValueError):self.store.restore(out.getvalue())
         self.assertEqual(self.store.application(a['id'])['company'],'测试公司')
+    def test_delete_keeps_other_records_and_mail_and_can_restore(self):
+        p=self.payload();p['uploads']=[dict(name='CV.txt',kind='cv',data=base64.b64encode(b'submitted CV').decode())]
+        a=self.store.save(p);did=a['documents'][0]['id']
+        other=self.store.save({**self.payload(),'company':'Keep this company'})
+        mid=s.ID()
+        with self.store.connect() as c:
+            c.execute('INSERT INTO mails VALUES(?,?,?,?,?,?,?,?,?,?)',(mid,'test@example.com','mail1','thread1','jobs@example.com','Interview',s.NOW(),'snippet','Original email',a['id']))
+        result=self.store.delete_application(a['id'])
+        self.assertTrue(result['ok']);self.assertEqual(self.store.application(other['id'])['company'],'Keep this company')
+        with self.assertRaises(ValueError):self.store.application(a['id'])
+        self.assertFalse((self.store.files/did).exists())
+        self.assertEqual(self.store.all('documents'),[]);self.assertEqual(len(self.store.all('history')),1)
+        mail=self.store.all('mails')[0];self.assertIsNone(mail['application_id']);self.assertEqual(mail['body'],'Original email')
+        backup=self.store.dir/'backups'/result['safety_backup']
+        self.store.restore(backup.read_bytes())
+        self.assertEqual(self.store.application(a['id'])['documents'][0]['id'],did)
+        self.assertEqual((self.store.files/did).read_bytes(),b'submitted CV')
+        self.assertEqual(self.store.all('mails')[0]['application_id'],a['id'])
+    def test_delete_backup_failure_keeps_records_and_files(self):
+        p=self.payload();p['new_letter']='Keep this cover letter';a=self.store.save(p);did=a['documents'][0]['id']
+        with patch.object(self.store,'backup',side_effect=OSError('Backup failed')):
+            with self.assertRaises(OSError):self.store.delete_application(a['id'])
+        with patch.object(s.Path,'write_bytes',side_effect=OSError('Disk full')):
+            with self.assertRaises(OSError):self.store.delete_application(a['id'])
+        self.assertEqual(self.store.application(a['id'])['company'],a['company'])
+        self.assertEqual((self.store.files/did).read_text(encoding='utf-8'),'Keep this cover letter')
+    def test_delete_api_requires_token_and_explicit_confirmation(self):
+        a=self.store.save(self.payload());http=s.make_server(self.tmp.name)
+        thread=threading.Thread(target=http.serve_forever,daemon=True);thread.start()
+        endpoint=http.origin+'/api/applications/'+a['id']+'/delete'
+        def post(payload,token=None):
+            headers={'Content-Type':'application/json'}
+            if token:headers['X-Archive-Token']=token
+            return urlopen(Request(endpoint,json.dumps(payload).encode(),headers))
+        try:
+            with self.assertRaises(HTTPError) as err:post({'confirm':'DELETE'})
+            self.assertEqual(err.exception.code,403)
+            with self.assertRaises(HTTPError) as err:post({},http.token)
+            self.assertEqual(err.exception.code,400)
+            self.assertEqual(self.store.application(a['id'])['status'],'已投递')
+            with post({'confirm':'DELETE'},http.token) as response:self.assertTrue(json.load(response)['ok'])
+            with self.assertRaises(ValueError):self.store.application(a['id'])
+        finally:http.shutdown();http.server_close();thread.join()
+    def test_racing_edit_does_not_recreate_deleted_record(self):
+        p=self.payload();a=self.store.save(p);read=self.store.application;deleted=False
+        def racing_read(aid):
+            nonlocal deleted
+            snapshot=read(aid)
+            if not deleted:
+                deleted=True;self.store.delete_application(aid)
+            return snapshot
+        with patch.object(self.store,'application',side_effect=racing_read):
+            with self.assertRaisesRegex(ValueError,'已删除'):self.store.save(p,a['id'])
+        self.assertEqual(self.store.all('applications'),[])
     def test_preferences_survive_reopening_without_changing_records(self):
         a=self.store.save(self.payload()); before=self.store.all('applications')
         self.assertEqual(self.store.preferences(),{'language':'zh-CN'})

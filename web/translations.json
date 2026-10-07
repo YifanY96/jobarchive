@@ -271,5 +271,15 @@
   "下个月": "Next month",
   "今天": "Today",
   "清空": "Clear",
-  "请使用 YYYY-MM-DD 格式填写有效日期。": "Enter a valid date in YYYY-MM-DD format."
+  "请使用 YYYY-MM-DD 格式填写有效日期。": "Enter a valid date in YYYY-MM-DD format.",
+  "删除这条投递": "Delete application",
+  "确认删除": "Confirm deletion",
+  "确认删除「{company} · {title}」？投递记录、归档材料和更新历史将被移除；关联邮件保留并解除关联。删除前会自动保存完整备份。未保存的修改将被放弃。": "Delete “{company} · {title}”? The application, archived documents and update history will be removed. Linked emails will be kept and unlinked. A full safety backup is created first. Unsaved changes will be discarded.",
+  "正在备份并删除…": "Creating a backup and deleting…",
+  "已删除。删除前备份保存在 data/backups/{name}": "Deleted. Safety backup saved in data/backups/{name}",
+  "请先确认删除这条投递": "Confirm deletion of this application first",
+  "这条投递已删除，请刷新列表": "This application was deleted. Refresh the list.",
+  "投递已删除，但刷新失败，请重新打开应用。": "The application was deleted, but refreshing failed. Please reopen the app.",
+  "无法生成可恢复的删除前备份，档案大小超出恢复限制": "Cannot create a restorable safety backup: the archive exceeds the restore limits.",
+  "投递已删除，但部分附件未能从磁盘清除；删除前备份已保留": "The application was deleted, but some attachment files could not be removed from disk. The safety backup was kept."
 }

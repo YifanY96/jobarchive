@@ -101,11 +101,12 @@ async function api(path, data) {
   return payload;
 }
 function action(el, fn) {el.addEventListener('click', async () => {el.disabled = true; try {await fn();} catch(e) {toast(e.message);} finally {el.disabled = false;}});}
-function confirmAction(message) {
+function confirmAction(message, acceptLabel = '继续') {
   const dialog = $('#confirmation');
   $('#confirm-message').textContent = message;
   $('#confirm-cancel').textContent = t('取消');
-  $('#confirm-ok').textContent = t('继续');
+  $('#confirm-ok').textContent = t(acceptLabel);
+  $('#confirm-ok').classList.toggle('danger',acceptLabel === '确认删除');
   return new Promise(resolve => {
     const finish = answer => {dialog.close(); resolve(answer);};
     $('#confirm-cancel').onclick = () => finish(false);
@@ -195,12 +196,13 @@ function openEditor(a = null) {
   for (const k of fields) f.elements[k].value = a?.[k] ?? (k === 'status' ? '已投递' : k === 'applied_date' ? today() : '');
   f.elements.submitted_date.value = a?.applied_date || today();
   $('#editor-title').textContent = t(a ? '编辑投递 / 新增提交材料' : '新建投递');
+  $('#delete-record').hidden = !editing;
   $('#form-message').textContent = ''; $('#fetch-jd').disabled = false; editorSnapshot = formSnapshot(); $('#editor').showModal();
 }
 async function file64(file) {if (file.size > 25*1024*1024) throw Error(t('{name} 超过 25 MB',{name:file.name})); return new Promise((resolve,reject) => {const reader = new FileReader(); reader.onload = () => resolve(reader.result.split(',')[1]); reader.onerror = () => reject(Error(t('文件读取失败'))); reader.readAsDataURL(file);});}
 $('#application-form').onsubmit = async e => {
   e.preventDefault(); if (saving) return;
-  saving = true; $('#save').disabled = true; $('#close-editor').disabled = true; $('#form-message').textContent = t('正在归档，请稍候…');
+  saving = true; $('#save').disabled = true; $('#close-editor').disabled = true; $('#delete-record').disabled = true; $('#form-message').textContent = t('正在归档，请稍候…');
   try {
     const f = e.target, payload = Object.fromEntries(fields.map(k => [k,f.elements[k].value]));
     payload.new_letter = f.elements.new_letter.value; payload.submitted_date = f.elements.submitted_date.value; payload.document_label = f.elements.document_label.value; payload.uploads = [];
@@ -210,8 +212,36 @@ $('#application-form').onsubmit = async e => {
     const a = await api('/api/applications'+(editing ? '/'+editing : ''),payload);
     selected = a.id; editorSession++; $('#editor').close(); await reload(); toast(t('已保存，新增材料已独立归档'));
   } catch(error) {$('#form-message').textContent = error.message;}
-  finally {saving = false; $('#save').disabled = false; $('#close-editor').disabled = false;}
+  finally {saving = false; $('#save').disabled = false; $('#close-editor').disabled = false; $('#delete-record').disabled = false;}
 };
+async function deleteEditingRecord() {
+  if (!editing || saving) return;
+  const id = editing, record = apps.find(a => a.id === id);
+  saving = true;
+  for (const selector of ['#save','#close-editor','#delete-record','#fetch-jd']) $(selector).disabled = true;
+  let deleted = false;
+  try {
+    const message = t('确认删除「{company} · {title}」？投递记录、归档材料和更新历史将被移除；关联邮件保留并解除关联。删除前会自动保存完整备份。未保存的修改将被放弃。',{company:record?.company || '',title:record?.title || ''});
+    if (!await confirmAction(message,'确认删除')) return;
+    editorSession++;
+    $('#form-message').textContent = t('正在备份并删除…');
+    const result = await api('/api/applications/'+id+'/delete',{confirm:'DELETE'});
+    deleted = true;
+    apps = apps.filter(a => a.id !== id);
+    mails = mails.map(m => m.application_id === id ? {...m,application_id:null} : m);
+    selected = null; selectedRecord = null; editing = null; detailRequest++;
+    $('#editor').close(); renderStats(); renderList();
+    await reload(); await loadMails();
+    toast(result.warning || t('已删除。删除前备份保存在 data/backups/{name}',{name:result.safety_backup}));
+  } catch(error) {
+    if (deleted) toast(t('投递已删除，但刷新失败，请重新打开应用。'));
+    else $('#form-message').textContent = error.message;
+  } finally {
+    saving = false;
+    for (const selector of ['#save','#close-editor','#delete-record','#fetch-jd']) $(selector).disabled = false;
+  }
+}
+$('#delete-record').onclick = deleteEditingRecord;
 action($('#fetch-jd'), async () => {
   const f = $('#application-form'), session = editorSession;
   const previousJD = f.elements.jd.value;

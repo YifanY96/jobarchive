@@ -2,9 +2,15 @@
 
 支持简体中文 / English、本机保存的个人求职管理工具，用于记录投递网页、JD、实际提交的 CV 与动机信、投递状态，以及关联的 Gmail 邮件。
 
-**当前源码 / 本机构建版本 1.2.0**：Windows ZIP 解压后双击 `JobArchive.exe`。公开发布版本见 [Releases](https://github.com/YifanY96/jobarchive/releases)。应用使用独立 Windows 窗口，软件仅监听 `127.0.0.1`。源码仓库不包含 EXE、运行库或用户的个人档案。
+**当前源码 / 本机构建版本 1.3.0**：Windows ZIP 解压后双击 `JobArchive.exe`。公开发布版本见 [Releases](https://github.com/YifanY96/jobarchive/releases)。应用使用独立 Windows 窗口，软件仅监听 `127.0.0.1`。源码仓库不包含 EXE、运行库或用户的个人档案。
 
 `JobArchive.exe` 与 `_internal` 文件夹必须一起保留。桌面版自带 Python 运行环境，使用本机已有的 Microsoft Edge WebView2，不需要安装 Python、Node 或 Docker，也不需要管理员权限。关闭窗口即停止该实例的本地服务，记录已在保存时写入磁盘；重复启动会回到现有窗口。现有 `data` 文件夹继续使用，无需迁移。备份和附件下载通过 Windows「另存为」对话框保存。
+
+v1.3.0 Windows 构建为预发布：本机的应用控制阻止了新 EXE 启动，打包版启动验证未完成；桌面源码模式已验证，可在安装桌面依赖后运行 `python desktop.py`。
+
+## 1.3.0 更新
+
+在档案详情点击「编辑 / 归档材料」，窗口底部可点击「删除这条投递」。新建时不显示删除按钮。确认后删除该记录、归档材料和更新历史，解除邮件关联；本机缓存与 Gmail 中的邮件都保留。删除前自动生成 `data/backups/before-delete_*.zip` 完整备份，备份失败则不删除。可在「备份与设置 → 从 ZIP 恢复」选择这份备份，恢复会把全部档案还原到备份时的状态。
 
 ## 语言显示修复
 
@@ -81,6 +87,6 @@ python -m unittest test_server -v
 
 已验证独立文件版本、记录历史、备份恢复及损坏备份拒绝、公开 JD 结构解析、内网抓取拒绝、邮件正文解码、Windows DPAPI 加密、API 访问限制，以及页面新增、状态编辑和搜索流程。测试数据位于开发工作目录，正式数据初始为空。
 
-桌面构建环境运行 `python -m unittest discover -s . -p "test_*.py" -v`，14 项检查通过（包含语言持久化、原有记录兼容、快捷状态更新、英文 CSV，以及模拟原生保存窗口的 ZIP/CSV 导出、取消保存、错误令牌及外部页面拒绝）。打包 EXE 的 `--smoke-test --data-dir <测试目录>` 已验证实际 WebView2 窗口加载、本地接口以及 JavaScript/Python 导出桥接；使用独立测试档案，不影响用户记录。
+桌面构建环境运行 `python -m unittest discover -s . -p "test_*.py" -v`，18 项检查通过（包含删除与备份恢复、备份失败保护、邮件解绑和并发编辑保护、语言持久化、原有记录兼容、快捷状态更新、英文 CSV，以及模拟原生保存窗口的 ZIP/CSV 导出、取消保存、错误令牌及外部页面拒绝）。v1.3.0 在本机的源码桌面模式已验证实际 WebView2 窗口加载、本地接口以及 JavaScript/Python 导出桥接；使用独立测试档案，不影响用户记录。新打包 EXE 被本机 Windows 应用控制阻止，打包版启动验证未完成。可在已安装桌面依赖的环境中运行 `python desktop.py`；本机已有快捷方式现已使用现有桌面运行环境。
 
 真实 Gmail 授权和同步尚未验证，需要用户导入客户端 JSON 并授权。网页抓取不保证支持所有招聘站点。当前是单用户本机工具，没有自动投递、自动检查网页或后台定时收邮件；需手动点击抓取/同步。

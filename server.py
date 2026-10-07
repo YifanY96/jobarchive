@@ -34,7 +34,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 ROOT = Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))
-VERSION = '1.2.0'
+VERSION = '1.3.0'
 TRANSLATIONS = json.loads((ROOT/'web'/'translations.json').read_text(encoding='utf-8-sig'))
 STATUSES = ['待投递', '已投递', '初筛', '笔试', '面试', 'Offer', '已拒绝', '已撤回']
 MAX_FILE = 25 * 1024 * 1024
@@ -165,6 +165,43 @@ class Archive:
             current['status'] = status
             return self.save(current, aid)
 
+    def delete_application(self, aid):
+        if not valid_id(aid):
+            raise ValueError('记录编号无效')
+        with LOCK:
+            current = self.application(aid)
+            raw = self.backup()
+            # A safety backup must fit the existing restore limits.
+            with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                if (len(raw) > MAX_BACKUP or len(z.infolist()) > 10000 or
+                        sum(x.file_size for x in z.infolist()) > MAX_BACKUP or
+                        z.getinfo('records.json').file_size > 30*1024*1024):
+                    raise ValueError('无法生成可恢复的删除前备份，档案大小超出恢复限制')
+            folder = self.dir/'backups'
+            folder.mkdir(exist_ok=True)
+            name = 'before-delete_'+datetime.now().strftime('%Y%m%d_%H%M%S')+'_'+ID()+'.zip'
+            destination = folder/name
+            destination.write_bytes(raw)
+            with self.connect() as c:
+                c.execute('UPDATE mails SET application_id=NULL WHERE application_id=?',(aid,))
+                c.execute('DELETE FROM history WHERE application_id=?',(aid,))
+                c.execute('DELETE FROM documents WHERE application_id=?',(aid,))
+                c.execute('DELETE FROM applications WHERE id=?',(aid,))
+            cleanup_failed = False
+            for doc in current['documents']:
+                # Database IDs must never be interpreted as arbitrary file paths.
+                if not valid_id(doc['id']):
+                    cleanup_failed = True
+                    continue
+                try:
+                    (self.files/doc['id']).unlink(missing_ok=True)
+                except OSError:
+                    cleanup_failed = True
+            result = {'ok':True,'safety_backup':name}
+            if cleanup_failed:
+                result['warning'] = '投递已删除，但部分附件未能从磁盘清除；删除前备份已保留'
+            return result
+
     def all(self, table):
         if table not in TABLES:
             raise ValueError('未知数据表')
@@ -229,6 +266,8 @@ class Archive:
         written = []
         try:
             with LOCK, self.connect() as c:
+                if old and not c.execute('SELECT 1 FROM applications WHERE id=?',(aid,)).fetchone():
+                    raise ValueError('这条投递已删除，请刷新列表')
                 stamp = NOW()
                 c.execute('''INSERT INTO applications VALUES(?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET company=excluded.company,title=excluded.title,
@@ -717,6 +756,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.json({'ok':True})
                 threading.Thread(target=self.server.shutdown,daemon=True).start(); return
             if path=='/api/applications': self.json(store.save(p)); return
+            if path.startswith('/api/applications/') and path.endswith('/delete'):
+                if p.get('confirm')!='DELETE': raise ValueError('请先确认删除这条投递')
+                self.json(store.delete_application(path.split('/')[-2])); return
             if path.startswith('/api/applications/') and path.endswith('/status'):
                 self.json(store.update_status(path.split('/')[-2],p.get('status'))); return
             if path.startswith('/api/applications/'):
