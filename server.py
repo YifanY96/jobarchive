@@ -34,13 +34,13 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 ROOT = Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))
-VERSION = '1.3.0'
+VERSION = '1.4.1'
 TRANSLATIONS = json.loads((ROOT/'web'/'translations.json').read_text(encoding='utf-8-sig'))
 STATUSES = ['待投递', '已投递', '初筛', '笔试', '面试', 'Offer', '已拒绝', '已撤回']
 MAX_FILE = 25 * 1024 * 1024
 MAX_BODY = 80 * 1024 * 1024
 MAX_BACKUP = 400 * 1024 * 1024
-TABLES = ('applications', 'documents', 'history', 'mails')
+TABLES = ('applications', 'documents', 'history', 'mails', 'cv_library')
 LOCK = threading.RLock()
 NOW = lambda: datetime.now(timezone.utc).isoformat(timespec='seconds')
 ID = lambda: str(uuid.uuid4())
@@ -118,6 +118,9 @@ class Archive:
             CREATE TABLE IF NOT EXISTS history(
               id TEXT PRIMARY KEY, application_id TEXT NOT NULL REFERENCES applications(id),
               event TEXT NOT NULL, snapshot TEXT NOT NULL, created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS cv_library(
+              id TEXT PRIMARY KEY, name TEXT NOT NULL, label TEXT NOT NULL,
+              size INTEGER NOT NULL, sha256 TEXT NOT NULL, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS mails(
               id TEXT PRIMARY KEY, account TEXT NOT NULL, gmail_id TEXT NOT NULL,
               thread_id TEXT NOT NULL, sender TEXT NOT NULL, subject TEXT NOT NULL,
@@ -165,23 +168,71 @@ class Archive:
             current['status'] = status
             return self.save(current, aid)
 
+    def library_cv(self, cid):
+        if not valid_id(cid):
+            raise ValueError('CV 编号无效')
+        with self.connect() as c:
+            row = c.execute('SELECT * FROM cv_library WHERE id=?',(cid,)).fetchone()
+        if not row:
+            raise ValueError('没有找到库内 CV，请刷新后重新选择')
+        item = dict(row)
+        raw = (self.files/cid).read_bytes()
+        if len(raw)!=item['size'] or hashlib.sha256(raw).hexdigest()!=item['sha256']:
+            raise ValueError('库内 CV 校验失败，请从备份恢复')
+        return item, raw
+
+    def add_library_cv(self, payload):
+        name = text(payload.get('name',''),255)
+        if not name or any(ch in name for ch in '\\/:\x00'):
+            raise ValueError('附件名称不合法')
+        if Path(name).suffix.lower() not in ('.pdf','.doc','.docx','.txt','.md','.rtf'):
+            raise ValueError('附件支持 PDF、DOC、DOCX、TXT、MD、RTF')
+        raw = base64.b64decode(payload.get('data',''),validate=True)
+        if not raw or len(raw)>MAX_FILE:
+            raise ValueError('附件不能为空，单个文件最大 25 MB')
+        item = dict(id=ID(),name=name,label=text(payload.get('label',''),200) or name,
+                    size=len(raw),sha256=hashlib.sha256(raw).hexdigest(),created_at=NOW())
+        path = self.files/item['id']
+        try:
+            with LOCK,self.connect() as c:
+                path.write_bytes(raw)
+                c.execute('INSERT INTO cv_library VALUES(?,?,?,?,?,?)',tuple(item.values()))
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
+        return item
+
+    def safety_backup(self, prefix):
+        raw = self.backup()
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            if (len(raw)>MAX_BACKUP or len(z.infolist())>10000 or
+                    sum(x.file_size for x in z.infolist())>MAX_BACKUP or
+                    z.getinfo('records.json').file_size>30*1024*1024):
+                raise ValueError('无法生成可恢复的删除前备份，档案大小超出恢复限制')
+        folder = self.dir/'backups';folder.mkdir(exist_ok=True)
+        name = prefix+'_'+datetime.now().strftime('%Y%m%d_%H%M%S')+'_'+ID()+'.zip'
+        (folder/name).write_bytes(raw)
+        return name
+
+    def delete_library_cv(self, cid):
+        with LOCK:
+            self.library_cv(cid)
+            name = self.safety_backup('before-cv-delete')
+            with self.connect() as c:
+                c.execute('DELETE FROM cv_library WHERE id=?',(cid,))
+            result = {'ok':True,'safety_backup':name}
+            try:
+                (self.files/cid).unlink(missing_ok=True)
+            except OSError:
+                result['warning'] = 'CV 已从库内移除，但文件未能从磁盘清除；删除前备份已保留'
+            return result
+
     def delete_application(self, aid):
         if not valid_id(aid):
             raise ValueError('记录编号无效')
         with LOCK:
             current = self.application(aid)
-            raw = self.backup()
-            # A safety backup must fit the existing restore limits.
-            with zipfile.ZipFile(io.BytesIO(raw)) as z:
-                if (len(raw) > MAX_BACKUP or len(z.infolist()) > 10000 or
-                        sum(x.file_size for x in z.infolist()) > MAX_BACKUP or
-                        z.getinfo('records.json').file_size > 30*1024*1024):
-                    raise ValueError('无法生成可恢复的删除前备份，档案大小超出恢复限制')
-            folder = self.dir/'backups'
-            folder.mkdir(exist_ok=True)
-            name = 'before-delete_'+datetime.now().strftime('%Y%m%d_%H%M%S')+'_'+ID()+'.zip'
-            destination = folder/name
-            destination.write_bytes(raw)
+            name = self.safety_backup('before-delete')
             with self.connect() as c:
                 c.execute('UPDATE mails SET application_id=NULL WHERE application_id=?',(aid,))
                 c.execute('DELETE FROM history WHERE application_id=?',(aid,))
@@ -268,6 +319,16 @@ class Archive:
             with LOCK, self.connect() as c:
                 if old and not c.execute('SELECT 1 FROM applications WHERE id=?',(aid,)).fetchone():
                     raise ValueError('这条投递已删除，请刷新列表')
+                cid = payload.get('cv_library_id','')
+                if cid:
+                    if len(uploads)>=10:
+                        raise ValueError('一次最多归档 10 个文件')
+                    template, raw = self.library_cv(cid)
+                    submitted = text(payload.get('submitted_date',fields['applied_date']),20)
+                    if submitted: date.fromisoformat(submitted)
+                    label = text(payload.get('document_label',''),200) or template['label']
+                    # Always copy: a later library removal must not affect submitted CVs.
+                    prepared.append((ID(),'cv',template['name'],raw,submitted,label))
                 stamp = NOW()
                 c.execute('''INSERT INTO applications VALUES(?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET company=excluded.company,title=excluded.title,
@@ -297,12 +358,12 @@ class Archive:
 
     def backup(self):
         with LOCK:
-            manifest = {'format':'jobarchive','version':1,'created_at':NOW(),
+            manifest = {'format':'jobarchive','version':2,'created_at':NOW(),
                         'tables':{t:self.all(t) for t in TABLES}}
             buf = io.BytesIO()
             with zipfile.ZipFile(buf,'w',zipfile.ZIP_DEFLATED) as z:
                 z.writestr('records.json',json.dumps(manifest,ensure_ascii=False,indent=2))
-                for doc in manifest['tables']['documents']:
+                for doc in manifest['tables']['documents']+manifest['tables']['cv_library']:
                     path = self.files / doc['id']
                     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != doc['sha256']:
                         raise ValueError('有附件缺失或被修改，无法生成完整备份：'+doc['name'])
@@ -323,9 +384,11 @@ class Archive:
                 if z.getinfo('records.json').file_size > 30*1024*1024:
                     raise ValueError('备份记录过大')
                 manifest = json.loads(z.read('records.json'))
-                if manifest.get('format') != 'jobarchive' or manifest.get('version') != 1:
+                if manifest.get('format') != 'jobarchive' or manifest.get('version') not in (1,2):
                     raise ValueError('这不是职投档案的备份文件')
                 tables = manifest['tables']
+                if manifest['version']==1 and set(tables)==set(TABLES)-{'cv_library'}:
+                    tables['cv_library']=[]
                 if set(tables) != set(TABLES):
                     raise ValueError('备份缺少数据表')
                 expected = {'records.json'}
@@ -334,14 +397,23 @@ class Archive:
                     if not isinstance(rows,list) or len(rows)>10000:
                         raise ValueError('备份记录无效')
                     for row in rows:
-                        if not valid_id(row.get('id')):
+                        if not isinstance(row,dict) or not valid_id(row.get('id')):
                             raise ValueError('备份记录编号不合法')
                 for r in tables['applications']:
                     if r['status'] not in STATUSES:
                         raise ValueError('备份中的状态无效')
                     valid_url(r['url'])
-                for d in tables['documents']:
+                for cv in tables['cv_library']:
+                    name=text(cv['name'],255)
+                    if not name or any(ch in name for ch in '\\/:\x00'):
+                        raise ValueError('附件名称不合法')
+                    if Path(name).suffix.lower() not in ('.pdf','.doc','.docx','.txt','.md','.rtf'):
+                        raise ValueError('附件支持 PDF、DOC、DOCX、TXT、MD、RTF')
+                    text(cv['label'],200)
+                for d in tables['documents']+tables['cv_library']:
                     name = 'files/'+d['id']
+                    if name in expected:
+                        raise ValueError('备份附件编号重复')
                     expected.add(name)
                     if z.getinfo(name).file_size > MAX_FILE:
                         raise ValueError('备份附件过大')
@@ -701,6 +773,8 @@ class Handler(BaseHTTPRequestHandler):
                 page='<!doctype html><meta charset="utf-8"><title>'+translate('Gmail 已连接',language)+'</title><p>'+translate('Gmail 已连接。可以关闭此页，回到职投档案刷新邮箱状态。',language)+'</p>'
                 self.send_bytes(page.encode(),'text/html; charset=utf-8'); return
             if path=='/api/preferences': self.json(store.preferences()); return
+            if path=='/api/cv-library':
+                self.json(sorted(store.all('cv_library'),key=lambda row:row['created_at'],reverse=True)); return
             if path=='/api/session': self.json({'token':self.server.token,'statuses':STATUSES}); return
             if path=='/api/applications': self.json(store.all('applications')); return
             if path.startswith('/api/applications/'):
@@ -730,6 +804,10 @@ class Handler(BaseHTTPRequestHandler):
                 if hashlib.sha256(raw).hexdigest()!=r['sha256']: raise ValueError('附件校验失败，请使用备份恢复')
                 self.send_bytes(raw,'application/octet-stream',extra={
                     'Content-Disposition':"attachment; filename*=UTF-8''"+quote(r['name'],safe='')}); return
+            if path.startswith('/cv-files/'):
+                item,raw=store.library_cv(path.rsplit('/',1)[1])
+                self.send_bytes(raw,'application/octet-stream',extra={
+                    'Content-Disposition':"attachment; filename*=UTF-8''"+quote(item['name'],safe='')}); return
             assets={'/':'index.html','/app.js':'app.js','/style.css':'style.css','/favicon.svg':'favicon.svg','/translations.json':'translations.json'}
             if path not in assets: self.json({'error':'页面不存在'},404); return
             asset=ROOT/'web'/assets[path]
@@ -752,6 +830,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(store.restore(self.rfile.read(size))); return
             p=self.body()
             if path=='/api/preferences': self.json(store.save_preferences(p)); return
+            if path=='/api/cv-library': self.json(store.add_library_cv(p)); return
+            if path.startswith('/api/cv-library/') and path.endswith('/delete'):
+                if p.get('confirm')!='DELETE': raise ValueError('请先确认从库内移除 CV')
+                self.json(store.delete_library_cv(path.split('/')[-2])); return
             if path=='/api/shutdown':
                 self.json({'ok':True})
                 threading.Thread(target=self.server.shutdown,daemon=True).start(); return

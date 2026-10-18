@@ -44,6 +44,9 @@ class DesktopAPI:
                 raw=(self._http.store.files/document_id).read_bytes()
                 if hashlib.sha256(raw).hexdigest()!=d['sha256']: raise ValueError('附件校验失败')
                 name=d['name']; extension=Path(name).suffix.lstrip('.')
+            elif kind=='library-cv' and server.valid_id(document_id):
+                d,raw=self._http.store.library_cv(document_id)
+                name=d['name'];extension=Path(name).suffix.lstrip('.')
             else: raise ValueError('无效的导出请求')
             result=self._window.create_file_dialog(webview.FileDialog.SAVE,save_filename=name,
                 file_types=(f'{extension.upper()} (*.{extension})',tr('所有文件 (*.*)')))
@@ -126,10 +129,10 @@ def main():
                     deadline=time.monotonic()+15
                     while window.evaluate_js("document.documentElement.dataset.ready")!='true' and time.monotonic()<deadline:
                         time.sleep(.1)
-                    page=window.evaluate_js("({title:document.title,heading:document.getElementById('page-title').textContent,bridge:typeof window.pywebview.api.export==='function',token:!!document.querySelector('meta[name=archive-token]').content})")
+                    page=window.evaluate_js("({title:document.title,heading:document.getElementById('page-title').textContent,bridge:typeof window.pywebview.api.export==='function',token:!!document.querySelector('meta[name=archive-token]').content,library:!!document.getElementById('cv-library-select'),libraryNav:!!document.querySelector('[data-view=library]'),multiUpload:document.getElementById('library-file').multiple,uploadQueue:!!document.getElementById('library-upload-list')})")
                     req=Request(http.origin+'/api/info',headers={'X-Archive-Token':http.token})
                     with urlopen(req,timeout=5) as r:info=json.load(r)
-                    (data_dir/'smoke-result.json').write_text(json.dumps({'ok':page['heading']==server.translate('投递档案',language) and page['bridge'] and page['token'] and info['desktop'],'page':page,'version':info['version']},ensure_ascii=False),encoding='utf-8')
+                    (data_dir/'smoke-result.json').write_text(json.dumps({'ok':page['heading']==server.translate('投递档案',language) and page['bridge'] and page['token'] and page['library'] and page['libraryNav'] and page['multiUpload'] and page['uploadQueue'] and info['desktop'],'page':page,'version':info['version']},ensure_ascii=False),encoding='utf-8')
                 except Exception as exc:
                     (data_dir/'smoke-result.json').write_text(json.dumps({'ok':False,'error':str(exc)},ensure_ascii=False),encoding='utf-8')
                 finally:window.destroy()

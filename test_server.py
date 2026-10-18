@@ -87,6 +87,91 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(reopened.preferences(),{'language':'en'})
         reopened.restore(reopened.backup())
         self.assertEqual(reopened.preferences(),{'language':'en'})
+    def library_upload(self,label='English CV',raw=b'CV version 1'):
+        return dict(name='CV.txt',label=label,data=base64.b64encode(raw).decode())
+    def test_library_cv_is_copied_per_application_without_duplicate_on_edit(self):
+        cv=self.store.add_library_cv(self.library_upload())
+        second=self.store.add_library_cv(self.library_upload('French CV',b'CV version 2'))
+        a=self.store.save({**self.payload(),'cv_library_id':cv['id']})
+        b=self.store.save({**self.payload(),'company':'Other company','cv_library_id':second['id']})
+        da=a['documents'][0];db=b['documents'][0]
+        self.assertNotEqual(da['id'],cv['id']);self.assertNotEqual(da['id'],db['id'])
+        self.assertEqual(da['label'],'English CV');self.assertEqual(da['kind'],'cv')
+        self.assertEqual((self.store.files/da['id']).read_bytes(),b'CV version 1')
+        self.assertEqual((self.store.files/db['id']).read_bytes(),b'CV version 2')
+        updated=self.store.save({**self.payload(),'status':'面试'},a['id'])
+        self.assertEqual(len(updated['documents']),1)
+        (self.store.files/cv['id']).write_bytes(b'changed template')
+        self.assertEqual((self.store.files/da['id']).read_bytes(),b'CV version 1')
+        with self.assertRaisesRegex(ValueError,'校验失败'):
+            self.store.save({**self.payload(),'cv_library_id':cv['id']})
+        self.assertEqual(len(self.store.all('applications')),2)
+    def test_library_removal_keeps_archives_and_restore_recovers_library(self):
+        cv=self.store.add_library_cv(self.library_upload())
+        a=self.store.save({**self.payload(),'cv_library_id':cv['id']});did=a['documents'][0]['id']
+        result=self.store.delete_library_cv(cv['id'])
+        self.assertEqual(self.store.all('cv_library'),[])
+        self.assertFalse((self.store.files/cv['id']).exists())
+        self.assertEqual((self.store.files/did).read_bytes(),b'CV version 1')
+        self.assertEqual(self.store.application(a['id'])['documents'][0]['id'],did)
+        self.store.restore((self.store.dir/'backups'/result['safety_backup']).read_bytes())
+        self.assertEqual(self.store.library_cv(cv['id'])[1],b'CV version 1')
+        self.store.delete_application(a['id'])
+        self.assertEqual(self.store.library_cv(cv['id'])[1],b'CV version 1')
+    def test_library_backup_and_legacy_upgrade_restore(self):
+        a=self.store.save({**self.payload(),'new_letter':'Original letter'})
+        with zipfile.ZipFile(io.BytesIO(self.store.backup())) as z:
+            manifest=json.loads(z.read('records.json'));manifest['version']=1;manifest['tables'].pop('cv_library')
+            legacy=io.BytesIO()
+            with zipfile.ZipFile(legacy,'w',zipfile.ZIP_DEFLATED) as out:
+                out.writestr('records.json',json.dumps(manifest))
+                for doc in manifest['tables']['documents']:out.writestr('files/'+doc['id'],z.read('files/'+doc['id']))
+        with self.store.connect() as c:c.execute('DROP TABLE cv_library')
+        upgraded=s.Archive(self.tmp.name)
+        self.assertEqual(upgraded.all('cv_library'),[])
+        self.assertEqual(upgraded.application(a['id'])['company'],a['company'])
+        cv=upgraded.add_library_cv(self.library_upload());backup=upgraded.backup()
+        with zipfile.ZipFile(io.BytesIO(backup)) as z:
+            self.assertEqual(json.loads(z.read('records.json'))['version'],2)
+            self.assertEqual(z.read('files/'+cv['id']),b'CV version 1')
+        upgraded.restore(legacy.getvalue())
+        self.assertEqual(upgraded.all('cv_library'),[])
+        self.assertEqual(len(upgraded.application(a['id'])['documents']),1)
+        upgraded.restore(backup)
+        self.assertEqual(upgraded.library_cv(cv['id'])[1],b'CV version 1')
+    def test_invalid_library_selection_and_failed_removal_preserve_data(self):
+        cv=self.store.add_library_cv(self.library_upload())
+        for cid in ['../../outside',s.ID()]:
+            with self.assertRaises(ValueError):self.store.save({**self.payload(),'cv_library_id':cid})
+        self.assertEqual(self.store.all('applications'),[])
+        with self.assertRaises(ValueError):self.store.add_library_cv({**self.library_upload(),'name':'bad.exe'})
+        with patch.object(self.store,'safety_backup',side_effect=OSError('Disk full')):
+            with self.assertRaises(OSError):self.store.delete_library_cv(cv['id'])
+        self.assertEqual(self.store.library_cv(cv['id'])[1],b'CV version 1')
+    def test_corrupted_library_backup_rejected_without_changing_data(self):
+        cv=self.store.add_library_cv(self.library_upload());raw=io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(self.store.backup())) as z,zipfile.ZipFile(raw,'w') as out:
+            for name in z.namelist():out.writestr(name,b'tampered' if name=='files/'+cv['id'] else z.read(name))
+        with self.assertRaises(ValueError):self.store.restore(raw.getvalue())
+        self.assertEqual(self.store.library_cv(cv['id'])[1],b'CV version 1')
+    def test_cv_library_http_auth_and_selection(self):
+        http=s.make_server(self.tmp.name);thread=threading.Thread(target=http.serve_forever,daemon=True);thread.start()
+        headers={'X-Archive-Token':http.token,'Content-Type':'application/json'}
+        def post(path,data):
+            with urlopen(Request(http.origin+path,json.dumps(data).encode(),headers)) as response:return json.load(response)
+        try:
+            with self.assertRaises(HTTPError) as err:urlopen(http.origin+'/api/cv-library')
+            self.assertEqual(err.exception.code,403)
+            cv=post('/api/cv-library',self.library_upload())
+            with urlopen(Request(http.origin+'/api/cv-library',headers=headers)) as response:self.assertEqual(json.load(response)[0]['id'],cv['id'])
+            with urlopen(Request(http.origin+'/cv-files/'+cv['id'],headers=headers)) as response:self.assertEqual(response.read(),b'CV version 1')
+            a=post('/api/applications',{**self.payload(),'cv_library_id':cv['id']})
+            self.assertEqual(len(a['documents']),1)
+            with self.assertRaises(HTTPError):post('/api/cv-library/'+cv['id']+'/delete',{})
+            self.assertEqual(len(http.store.all('cv_library')),1)
+            post('/api/cv-library/'+cv['id']+'/delete',{'confirm':'DELETE'})
+            self.assertEqual(len(http.store.application(a['id'])['documents']),1)
+        finally:http.shutdown();http.server_close();thread.join()
     def test_quick_status_preserves_documents_and_fields(self):
         p=self.payload();p['new_letter']='Original letter';a=self.store.save(p)
         original=self.store.application(a['id'])

@@ -1,4 +1,4 @@
-import io,json,tempfile,threading,unittest,zipfile
+import base64,io,json,tempfile,threading,unittest,zipfile
 from pathlib import Path
 from unittest.mock import Mock
 import desktop,server
@@ -32,5 +32,11 @@ class DesktopTests(unittest.TestCase):
         self.assertIn('error',self.api.set_language(self.http.token))
     def test_rejects_arbitrary_paths(self):
         self.assertIn('error',self.api.export(self.http.token,'document','../../secret'));self.assertIn('error',self.api.export(self.http.token,'unknown'));self.window.create_file_dialog.assert_not_called()
+    def test_library_cv_native_export_and_path_validation(self):
+        cv=self.http.store.add_library_cv({'name':'CV.txt','label':'English CV','data':base64.b64encode(b'Original CV').decode()})
+        self.assertIn('path',self.api.export(self.http.token,'library-cv',cv['id']))
+        self.assertEqual(self.path.read_bytes(),b'Original CV')
+        self.assertEqual(self.window.create_file_dialog.call_args.kwargs['save_filename'],'CV.txt')
+        self.assertIn('error',self.api.export(self.http.token,'library-cv','../../outside'))
 
 if __name__=='__main__':unittest.main(verbosity=2)

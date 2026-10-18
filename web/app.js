@@ -80,7 +80,8 @@ const token = $('meta[name=archive-token]').content;
 // Persisted status values stay compatible with existing records and backups.
 const statuses = ['待投递','已投递','初筛','笔试','面试','Offer','已拒绝','已撤回'];
 const fields = ['company','title','url','jd','applied_date','status','notes'];
-let apps = [], mails = [], selected = null, editing = null, mailSelected = null;
+let apps = [], mails = [], library = [], selected = null, editing = null, mailSelected = null;
+let librarySaving = false, libraryUploads = [];
 let nextPage = '', view = 'applications', desktop = false, language = 'zh-CN', translations = {};
 let selectedRecord = null, detailRequest = 0, editorSnapshot = '', editorSession = 0, saving = false;
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -129,12 +130,13 @@ function translatePage() {
   $('#status-filter').value = status;
   $('#application-form').elements.status.innerHTML = statusOptions(editorStatus);
   $('#language').value = language;
-  $('#page-title').textContent = t({applications:'投递档案',mail:'求职邮箱',settings:'备份与设置'}[view]);
+  $('#page-title').textContent = t({applications:'投递档案',library:'CV 库',mail:'求职邮箱',settings:'备份与设置'}[view]);
   $('#eyebrow').textContent = t(desktop ? '你的本机求职工作台' : '你的求职工作台');
   $('#shutdown').textContent = t(desktop ? '关闭应用' : '停止本地服务');
   $('#close-hint').textContent = t(desktop ? '关闭应用窗口即停止服务，已保存的档案会保留在本机。' : '关闭网页不会停止本地服务。下次运行启动文件即可回到这里。');
   $('#editor-title').textContent = t(editing ? '编辑投递 / 新增提交材料' : '新建投递');
   renderStats(); renderList();
+  renderLibrary(); renderLibraryUploads();
   if (selectedRecord && selectedRecord.id === selected) renderDetail(selectedRecord);
   renderMails();
   if (mailSelected) showMail(mailSelected); else emptyMail();
@@ -187,12 +189,13 @@ function historyText(raw) {
   try {const s = JSON.parse(raw); return [['状态',t(s.status)],['日期',s.applied_date],['公司',s.company],['职位',s.title],['网页',s.url],['备注',s.notes]].map(([label,value]) => `${t(label)}: ${value ?? ''}`).join('\n') + '\n\nJD:\n' + s.jd;}
   catch {return raw;}
 }
-function formSnapshot() {const f = $('#application-form'); return JSON.stringify([...fields,'submitted_date','document_label','new_letter'].map(k => f.elements[k].value).concat([...$('#cv-files').files,...$('#letter-files').files].map(f => [f.name,f.size,f.lastModified])));}
+function formSnapshot() {const f = $('#application-form'); return JSON.stringify([...fields,'submitted_date','document_label','new_letter','cv_library_id'].map(k => f.elements[k].value).concat([...$('#cv-files').files,...$('#letter-files').files].map(f => [f.name,f.size,f.lastModified])));}
 function dirtyEditor() {return $('#editor').open && formSnapshot() !== editorSnapshot;}
 async function closeEditor() {if (saving) return; if (dirtyEditor() && !await confirmAction(t('有尚未保存的修改，确定放弃吗？'))) return; editorSession++; $('#editor').close();}
 function openEditor(a = null) {
   editing = a?.id || null; editorSession++;
   const f = $('#application-form'); f.reset();
+  renderLibraryOptions();
   for (const k of fields) f.elements[k].value = a?.[k] ?? (k === 'status' ? '已投递' : k === 'applied_date' ? today() : '');
   f.elements.submitted_date.value = a?.applied_date || today();
   $('#editor-title').textContent = t(a ? '编辑投递 / 新增提交材料' : '新建投递');
@@ -205,9 +208,9 @@ $('#application-form').onsubmit = async e => {
   saving = true; $('#save').disabled = true; $('#close-editor').disabled = true; $('#delete-record').disabled = true; $('#form-message').textContent = t('正在归档，请稍候…');
   try {
     const f = e.target, payload = Object.fromEntries(fields.map(k => [k,f.elements[k].value]));
-    payload.new_letter = f.elements.new_letter.value; payload.submitted_date = f.elements.submitted_date.value; payload.document_label = f.elements.document_label.value; payload.uploads = [];
+    payload.new_letter = f.elements.new_letter.value; payload.submitted_date = f.elements.submitted_date.value; payload.document_label = f.elements.document_label.value; payload.cv_library_id = f.elements.cv_library_id.value; payload.uploads = [];
     const files = [['#cv-files','cv'],['#letter-files','letter']].flatMap(([selector,kind]) => [...$(selector).files].map(file => ({file,kind})));
-    if (files.length > 10) throw Error(t('一次最多归档 10 个文件'));
+    if (files.length + (payload.cv_library_id ? 1 : 0) > 10) throw Error(t('一次最多归档 10 个文件'));
     for (const {file,kind} of files) payload.uploads.push({name:file.name,kind,data:await file64(file),submitted_date:payload.submitted_date,label:payload.document_label});
     const a = await api('/api/applications'+(editing ? '/'+editing : ''),payload);
     selected = a.id; editorSession++; $('#editor').close(); await reload(); toast(t('已保存，新增材料已独立归档'));
@@ -259,12 +262,82 @@ action($('#fetch-jd'), async () => {
 });
 function showView(name) {
   view = name;
-  for (const n of ['applications','mail','settings']) $('#'+n+'-view').hidden = n !== name;
+  for (const n of ['applications','library','mail','settings']) $('#'+n+'-view').hidden = n !== name;
   document.querySelectorAll('nav button').forEach(b => {b.classList.toggle('active',b.dataset.view === name); b.setAttribute('aria-current',b.dataset.view === name ? 'page' : 'false');});
-  $('#page-title').textContent = t({applications:'投递档案',mail:'求职邮箱',settings:'备份与设置'}[name]);
+  $('#page-title').textContent = t({applications:'投递档案',library:'CV 库',mail:'求职邮箱',settings:'备份与设置'}[name]);
   $('#add').hidden = name !== 'applications'; $('#stats').hidden = name !== 'applications';
   if (name === 'mail') {gmailStatus().catch(e => toast(e.message)); loadMails().catch(e => toast(e.message));}
+  if (name === 'library') loadLibrary().catch(e => toast(e.message));
 }
+function renderLibraryOptions() {
+  const select = $('#cv-library-select'), value = select.value;
+  select.innerHTML = `<option value="">${esc(t('不从库内添加 CV'))}</option>` + library.map(cv => `<option value="${cv.id}">${esc(cv.label)} · ${esc(cv.name)} · ${esc(cv.created_at.slice(0,10))}</option>`).join('');
+  select.value = library.some(cv => cv.id === value) ? value : '';
+}
+function renderLibrary() {
+  renderLibraryOptions();
+  $('#cv-library-list').innerHTML = library.length ? library.map(cv => `<article class="panel library-card"><h3>${esc(cv.label)}</h3><p class="mono">${esc(cv.name)}</p><p class="hint">${(cv.size/1024).toFixed(1)} KB · ${stamp(cv.created_at)}</p><div class="actions"><a class="button" href="/cv-files/${cv.id}">${esc(t('下载 CV'))}</a><button class="danger" data-remove-cv="${cv.id}">${esc(t('从库内移除'))}</button></div></article>`).join('') : `<div class="panel empty"><b>${esc(t('还没有常用 CV'))}</b>${esc(t('先上传 CV，之后每次投递只需在下拉菜单中选用。'))}</div>`;
+  $('#cv-library-list').querySelectorAll('[data-remove-cv]').forEach(button => action(button,async () => {
+    const cv = library.find(item => item.id === button.dataset.removeCv);
+    if (!await confirmAction(t('从 CV 库移除「{name}」？历史投递中的独立副本会保留，移除前会自动备份。',{name:cv.label}),'确认删除')) return;
+    const result = await api('/api/cv-library/'+cv.id+'/delete',{confirm:'DELETE'});
+    await loadLibrary(); toast(result.warning || t('已从 CV 库移除，历史投递不受影响。'));
+  }));
+}
+async function loadLibrary() {library = await api('/api/cv-library'); renderLibrary();}
+function renderLibraryUploads() {
+  $('#library-upload-list').innerHTML = libraryUploads.map((item,index) => {
+    const status = {pending:'等待上传',saving:'正在保存 CV…',done:'已保存',failed:'上传失败'}[item.status];
+    return `<div class="library-upload-item"><label><span class="mono">${esc(item.file.name)}</span><input data-cv-label="${index}" maxlength="200" value="${esc(item.label)}" aria-label="${esc(t('CV 名称 / 版本')+' · '+item.file.name)}" ${librarySaving || item.status === 'done' ? 'disabled' : ''}></label><small class="upload-status ${item.status}" role="status">${esc(t(status))}${item.error ? ' · '+esc(item.error) : ''}</small></div>`;
+  }).join('');
+  $('#save-library-cv').textContent = t(libraryUploads.some(item => item.status === 'failed') ? '重试失败项' : '保存到 CV 库');
+}
+function openLibraryUploader() {
+  $('#library-upload-form').reset(); libraryUploads = []; renderLibraryUploads();
+  $('#library-upload-message').textContent = ''; $('#library-editor').showModal();
+}
+$('#library-file').onchange = () => {
+  libraryUploads = Array.from($('#library-file').files, file => ({file,label:file.name,status:'pending',error:''}));
+  $('#library-upload-message').textContent = t('已选择 {count} 份 CV，可分别修改名称 / 版本。',{count:libraryUploads.length});
+  renderLibraryUploads();
+};
+$('#library-upload-list').oninput = event => {
+  const index = event.target.dataset.cvLabel;
+  if (index !== undefined && !librarySaving && libraryUploads[index]?.status !== 'done') libraryUploads[index].label = event.target.value;
+};
+$('#add-library-cv').onclick = openLibraryUploader;
+$('#upload-library-inline').onclick = openLibraryUploader;
+function closeLibraryUploader() {if (!librarySaving) $('#library-editor').close();}
+$('#close-library-editor').onclick = closeLibraryUploader;
+$('#library-editor').addEventListener('cancel',event => {event.preventDefault(); closeLibraryUploader();});
+$('#library-upload-form').onsubmit = async event => {
+  event.preventDefault(); if (librarySaving) return;
+  if (!libraryUploads.length) {$('#library-upload-message').textContent = t('请选择 CV 文件'); return;}
+  librarySaving = true; $('#save-library-cv').disabled = true; $('#close-library-editor').disabled = true; $('#library-file').disabled = true;
+  try {
+    // Keep each request small and retain successful items when retrying a batch.
+    for (const [index,item] of libraryUploads.entries()) {
+      if (item.status === 'done') continue;
+      item.status = 'saving'; item.error = ''; renderLibraryUploads();
+      $('#library-upload-message').textContent = t('正在保存第 {current} / {total} 份 CV…',{current:index+1,total:libraryUploads.length});
+      try {
+        item.saved = await api('/api/cv-library',{name:item.file.name,label:item.label,data:await file64(item.file)});
+        item.status = 'done'; library = [item.saved,...library];
+      } catch(error) {item.status = 'failed'; item.error = error.message;}
+      renderLibrary(); renderLibraryUploads();
+    }
+    const failed = libraryUploads.filter(item => item.status === 'failed').length;
+    if (failed) {
+      $('#library-upload-message').textContent = t('已保存 {saved} 份，失败 {failed} 份。重试只会上传失败项。',{saved:libraryUploads.length-failed,failed});
+    } else {
+      if ($('#editor').open && libraryUploads.length === 1) $('#cv-library-select').value = libraryUploads[0].saved.id;
+      $('#library-editor').close(); toast(t('已将 {count} 份 CV 加入库，可在投递时下拉选用。',{count:libraryUploads.length}));
+    }
+  } finally {
+    librarySaving = false; $('#save-library-cv').disabled = false; $('#close-library-editor').disabled = false; $('#library-file').disabled = false;
+    renderLibraryUploads();
+  }
+};
 async function gmailStatus() {
   const s = await api('/api/gmail');
   $('#gmail-state').textContent = s.connected ? t('已连接 {email} · 只读权限',{email:s.email}) : t(s.configured ? '配置已导入，点击连接 Gmail 完成授权。' : '尚未连接。首次使用请先导入 Google 桌面 OAuth 配置。');
@@ -301,7 +374,7 @@ async function download(path,name) {
 }
 action($('#backup'), () => download('/api/backup','JobArchive_'+today()+'.zip'));
 action($('#csv'), () => download('/api/csv','applications_'+today()+'.csv'));
-$('#restore').onchange = async e => {const file = e.target.files[0]; try {if (!file) return; if (file.size > 400*1024*1024) throw Error(t('备份上限 400 MB')); if (!await confirmAction(t('这会替换当前全部档案与材料。软件会先保存恢复前备份。确定恢复？'))) return; toast(t('正在校验并恢复…')); const r = await fetch('/api/restore',{method:'POST',headers:{'X-Archive-Token':token,'X-Confirm':'RESTORE','Content-Type':'application/zip'},body:file}); const p = await r.json(); if (!r.ok) throw Error(p.error); selected = null; mailSelected = null; await reload(); await loadMails(); toast(t('恢复完成；恢复前备份保存在本机 data/backups 文件夹'));} catch(error) {toast(error.message);} finally {e.target.value = '';}};
+$('#restore').onchange = async e => {const file = e.target.files[0]; try {if (!file) return; if (file.size > 400*1024*1024) throw Error(t('备份上限 400 MB')); if (!await confirmAction(t('这会替换当前全部档案与材料。软件会先保存恢复前备份。确定恢复？'))) return; toast(t('正在校验并恢复…')); const r = await fetch('/api/restore',{method:'POST',headers:{'X-Archive-Token':token,'X-Confirm':'RESTORE','Content-Type':'application/zip'},body:file}); const p = await r.json(); if (!r.ok) throw Error(p.error); selected = null; mailSelected = null; await reload(); await loadMails(); await loadLibrary(); toast(t('恢复完成；恢复前备份保存在本机 data/backups 文件夹'));} catch(error) {toast(error.message);} finally {e.target.value = '';}};
 action($('#shutdown'), async () => {if (!await confirmAction(t(desktop ? '确定关闭应用？已保存的档案会保留。' : '停止本地服务？重新运行启动文件可以再次打开。'))) return; await api('/api/shutdown',{}); document.body.innerHTML = `<main><h1>${esc(t('本地服务已停止'))}</h1><p>${esc(t('你的档案已经保存在本机。重新运行「启动职投档案」即可继续。'))}</p></main>`;});
 $('#language').onchange = async e => {
   const select = e.target; select.disabled = true;
@@ -310,15 +383,15 @@ $('#language').onchange = async e => {
 };
 $('#add').onclick = () => openEditor(); $('#close-editor').onclick = closeEditor;
 $('#editor').addEventListener('cancel',e => {e.preventDefault(); closeEditor();});
-window.addEventListener('beforeunload',e => {if (dirtyEditor() || saving) {e.preventDefault(); e.returnValue = '';}});
+window.addEventListener('beforeunload',e => {if (dirtyEditor() || saving || librarySaving) {e.preventDefault(); e.returnValue = '';}});
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => showView(b.dataset.view));
 for (const id of ['search','status-filter','date-from','date-to','sort']) $('#'+id).addEventListener('input',renderList);
 $('#clear-filters').onclick = () => {for (const id of ['search','status-filter','date-from','date-to']) $('#'+id).value = ''; ArchiveDates.refresh(); renderList(); $('#search').focus();};
 $('#mail-search').oninput = renderMails;
-document.addEventListener('keydown',e => {if (!(e.ctrlKey || e.metaKey) || e.altKey || $('#editor').open) return; if (e.key.toLowerCase() === 'k') {e.preventDefault(); showView('applications'); $('#search').focus(); $('#search').select();} if (e.key.toLowerCase() === 'n') {e.preventDefault(); showView('applications'); openEditor();}});
-document.addEventListener('click',e => {const a = e.target.closest('a[href^="/files/"]'); if (desktop && a) {e.preventDefault(); nativeExport('document',a.getAttribute('href').split('/').pop()).catch(error => toast(error.message));}});
+document.addEventListener('keydown',e => {if (!(e.ctrlKey || e.metaKey) || e.altKey || $('#editor').open || $('#library-editor').open || $('#confirmation').open) return; if (e.key.toLowerCase() === 'k') {e.preventDefault(); showView('applications'); $('#search').focus(); $('#search').select();} if (e.key.toLowerCase() === 'n') {e.preventDefault(); showView('applications'); openEditor();}});
+document.addEventListener('click',e => {const a = e.target.closest('a[href^="/files/"],a[href^="/cv-files/"]'); if (desktop && a) {e.preventDefault(); nativeExport(a.getAttribute('href').startsWith('/cv-files/') ? 'library-cv' : 'document',a.getAttribute('href').split('/').pop()).catch(error => toast(error.message));}});
 async function boot() {
-  try {const [catalog,info] = await Promise.all([api('/translations.json'),api('/api/info')]); translations = catalog; language = info.language || 'zh-CN'; desktop = !!info.desktop; $('#data-path').textContent = info.data_dir; $('#app-version').textContent = 'v'+info.version; ArchiveDates.init(); translatePage(); await reload(); document.documentElement.dataset.ready = 'true';}
+  try {const [catalog,info] = await Promise.all([api('/translations.json'),api('/api/info')]); translations = catalog; language = info.language || 'zh-CN'; desktop = !!info.desktop; $('#data-path').textContent = info.data_dir; $('#app-version').textContent = 'v'+info.version; ArchiveDates.init(); await loadLibrary(); translatePage(); await reload(); document.documentElement.dataset.ready = 'true';}
   catch(error) {toast(error.message);}
 }
 boot();
