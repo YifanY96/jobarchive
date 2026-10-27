@@ -320,5 +320,20 @@
   "重试失败项": "Retry failed uploads",
   "正在保存第 {current} / {total} 份 CV…": "Saving CV {current} of {total}…",
   "已保存 {saved} 份，失败 {failed} 份。重试只会上传失败项。": "Saved {saved}; failed {failed}. Retrying uploads only failed items.",
-  "已将 {count} 份 CV 加入库，可在投递时下拉选用。": "Added {count} CVs to your library. Choose one from the application dropdown."
+  "已将 {count} 份 CV 加入库，可在投递时下拉选用。": "Added {count} CVs to your library. Choose one from the application dropdown.",
+  "已归档文件": "Archived files",
+  "删除在保存档案时生效；可撤销标记，取消编辑不会删除。保存前会确认并自动备份。": "Deletions apply when you save. You can undo a mark or cancel editing to keep files. You will confirm before saving, and a full backup is created first.",
+  "待删除（保存后生效）": "Marked for deletion (applies on save)",
+  "撤销删除": "Undo deletion",
+  "删除文件": "Delete file",
+  "这条投递暂无已归档文件。": "This application has no archived files.",
+  "保存时将删除 {count} 份已归档文件：\n{names}\n\n删除前会自动完整备份，备份失败则不保存。CV 库原文件及其他投递不受影响。": "Saving will delete {count} archived files:\n{names}\n\nA full backup is created first. If backup fails, nothing is saved. CV library originals and other applications are unaffected.",
+  "已保存。已删除 {count} 份文件，删除前备份保存在 data/backups/{name}": "Saved. Deleted {count} files. Safety backup saved in data/backups/{name}",
+  "删除 {count} 份归档材料": "Archived files deleted: {count}",
+  "删除的归档文件": "Deleted archived files",
+  "待删除文件编号无效": "Invalid file IDs for deletion",
+  "请先确认删除所选归档文件": "Confirm deletion of the selected archived files first",
+  "所选文件已不存在或不属于这条投递，请刷新后重试": "A selected file no longer exists or belongs to another application. Refresh and try again.",
+  "文件已从档案移除，但未能从磁盘清除；删除前备份已保留": "The file was removed from this archive, but could not be removed from disk. The safety backup was kept.",
+  "请重开 JobArchive 后再删除文件，当前服务尚未更新。": "Restart JobArchive before deleting files. The running service has not been updated yet."
 }

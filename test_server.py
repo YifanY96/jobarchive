@@ -1,4 +1,4 @@
-import base64,io,json,tempfile,threading,unittest,zipfile
+import base64,io,json,sqlite3,tempfile,threading,unittest,zipfile
 from urllib.request import Request,urlopen
 from urllib.error import HTTPError
 import server as s
@@ -89,6 +89,82 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(reopened.preferences(),{'language':'en'})
     def library_upload(self,label='English CV',raw=b'CV version 1'):
         return dict(name='CV.txt',label=label,data=base64.b64encode(raw).decode())
+    def removal(self, did, **extra):
+        return {**self.payload(),'remove_document_ids':[did],'confirm_document_delete':'DELETE',**extra}
+    def test_delete_document_on_save_keeps_library_other_copies_and_can_restore(self):
+        cv=self.store.add_library_cv(self.library_upload())
+        a=self.store.save({**self.payload(),'cv_library_id':cv['id'],'new_letter':'Keep letter'})
+        other=self.store.save({**self.payload(),'company':'Other','cv_library_id':cv['id']})
+        doc=next(d for d in a['documents'] if d['kind']=='cv')
+        kept=next(d for d in a['documents'] if d['kind']=='letter')
+        result=self.store.save(self.removal(doc['id'],notes='Corrected',new_letter='New letter'),a['id'])
+        self.assertEqual(result['notes'],'Corrected');self.assertEqual(len(result['documents']),2)
+        self.assertIn(kept['id'],[d['id'] for d in result['documents']])
+        self.assertFalse((self.store.files/doc['id']).exists())
+        self.assertEqual(self.store.library_cv(cv['id'])[1],b'CV version 1')
+        self.assertEqual(self.store.application(other['id'])['documents'],other['documents'])
+        event=next(h for h in result['history'] if '删除 1 份归档材料' in h['event'])
+        self.assertEqual(json.loads(event['snapshot'])['removed_documents'][0]['name'],doc['name'])
+        self.store.restore((self.store.dir/'backups'/result['safety_backup']).read_bytes())
+        restored=self.store.application(a['id'])
+        self.assertEqual(restored['notes'],'');self.assertEqual(len(restored['documents']),2)
+        self.assertEqual((self.store.files/doc['id']).read_bytes(),b'CV version 1')
+    def test_document_deletion_requires_confirmation_and_belonging_to_application(self):
+        a=self.store.save({**self.payload(),'new_letter':'Keep this file'});did=a['documents'][0]['id']
+        other=self.store.save(self.payload())
+        for payload,aid in [
+            ({**self.payload(),'remove_document_ids':[did]},a['id']),
+            (self.removal(did),other['id']),
+            (self.removal(did),None),
+            (self.removal('../../outside'),a['id']),
+            (self.removal(did,remove_document_ids=[did,did]),a['id']),
+            (self.removal(did,remove_document_ids='invalid'),a['id']),
+        ]:
+            with self.subTest(payload=payload,aid=aid),self.assertRaises(ValueError):self.store.save(payload,aid)
+        self.assertEqual(self.store.application(a['id'])['documents'],a['documents'])
+        self.assertEqual(len(self.store.all('applications')),2)
+    def test_document_deletion_backup_or_transaction_failure_preserves_files_and_fields(self):
+        a=self.store.save({**self.payload(),'new_letter':'Keep file'});did=a['documents'][0]['id']
+        files={p.name:p.read_bytes() for p in self.store.files.iterdir()}
+        payload=self.removal(did,notes='Do not persist',new_letter='Rollback new file')
+        with patch.object(self.store,'safety_backup',side_effect=OSError('Disk full')):
+            with self.assertRaises(OSError):self.store.save(payload,a['id'])
+        with self.store.connect() as c:
+            c.execute("CREATE TRIGGER fail_history BEFORE INSERT ON history BEGIN SELECT RAISE(ABORT, 'Test failure'); END")
+        with self.assertRaises(sqlite3.Error):self.store.save(payload,a['id'])
+        self.assertEqual(self.store.application(a['id']),a)
+        self.assertEqual({p.name:p.read_bytes() for p in self.store.files.iterdir()},files)
+    def test_stale_document_removal_rejected_without_saving_other_changes(self):
+        a=self.store.save({**self.payload(),'new_letter':'Remove file'});did=a['documents'][0]['id']
+        self.store.save(self.removal(did),a['id'])
+        with self.assertRaisesRegex(ValueError,'已不存在'):
+            self.store.save(self.removal(did,notes='Stale draft'),a['id'])
+        self.assertEqual(self.store.application(a['id'])['notes'],'')
+        self.assertEqual(self.store.application(a['id'])['documents'],[])
+    def test_document_cleanup_failure_reports_warning_with_restorable_backup(self):
+        a=self.store.save({**self.payload(),'new_letter':'File'});did=a['documents'][0]['id']
+        with patch.object(s.Path,'unlink',side_effect=OSError('File locked')):
+            result=self.store.save(self.removal(did),a['id'])
+        self.assertIn('warning',result);self.assertEqual(result['documents'],[])
+        self.assertTrue((self.store.files/did).exists())
+        self.assertTrue((self.store.dir/'backups'/result['safety_backup']).is_file())
+    def test_document_removal_http_requires_token_and_confirmation(self):
+        a=self.store.save({**self.payload(),'new_letter':'File'});did=a['documents'][0]['id']
+        http=s.make_server(self.tmp.name);thread=threading.Thread(target=http.serve_forever,daemon=True);thread.start()
+        def post(payload,token=None):
+            headers={'Content-Type':'application/json'}
+            if token:headers['X-Archive-Token']=token
+            return urlopen(Request(http.origin+'/api/applications/'+a['id'],json.dumps(payload).encode(),headers))
+        try:
+            with self.assertRaises(HTTPError) as e:post(self.removal(did))
+            self.assertEqual(e.exception.code,403)
+            with self.assertRaises(HTTPError) as e:post({**self.payload(),'remove_document_ids':[did]},http.token)
+            self.assertEqual(e.exception.code,400)
+            self.assertEqual(self.store.application(a['id'])['documents'],a['documents'])
+            with post(self.removal(did),http.token) as response:self.assertEqual(json.load(response)['documents'],[])
+            with self.assertRaises(HTTPError) as e:urlopen(Request(http.origin+'/files/'+did,headers={'X-Archive-Token':http.token}))
+            self.assertEqual(e.exception.code,400)
+        finally:http.shutdown();http.server_close();thread.join()
     def test_library_cv_is_copied_per_application_without_duplicate_on_edit(self):
         cv=self.store.add_library_cv(self.library_upload())
         second=self.store.add_library_cv(self.library_upload('French CV',b'CV version 2'))

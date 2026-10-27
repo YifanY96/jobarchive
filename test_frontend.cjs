@@ -66,7 +66,7 @@ test('dates validate Gregorian days without timezone or OS-locale dependencies',
   assert.equal((html.match(/ data-date/g)||[]).length,4);
   assert.ok(!html.includes('type="date"'));
 });
-test('CV dropdown keeps a valid selection, escapes names and clears removed choices',()=>{
+test('CV dropdown avoids repeating default names, keeps custom labels and preserves selection',()=>{
   const {run,nodes}=runtime();
   run("library = [{id:'cv1',label:'English <CV>',name:'CV & profile.txt',created_at:'2026-10-18T12:00:00Z'}];");
   run("$('#cv-library-select').value = 'cv1';");
@@ -74,6 +74,12 @@ test('CV dropdown keeps a valid selection, escapes names and clears removed choi
   assert.equal(nodes.get('#cv-library-select').value,'cv1');
   assert.match(nodes.get('#cv-library-select').innerHTML,/English &lt;CV&gt;/);
   assert.match(nodes.get('#cv-library-select').innerHTML,/CV &amp; profile.txt/);
+  run("library = [{id:'cv1',label:'CV.pdf',name:'CV.pdf',created_at:'2026-10-18T12:00:00Z'}]; renderLibraryOptions();");
+  assert.equal((nodes.get('#cv-library-select').innerHTML.match(/CV\.pdf/g)||[]).length,1);
+  assert.match(nodes.get('#cv-library-select').innerHTML,/>CV\.pdf · 2026-10-18<\/option>/);
+  assert.equal(nodes.get('#cv-library-select').value,'cv1');
+  run("library[0].label='   '; renderLibraryOptions();");
+  assert.match(nodes.get('#cv-library-select').innerHTML,/>CV\.pdf · 2026-10-18<\/option>/);
   run('library = []; renderLibraryOptions()');
   assert.equal(nodes.get('#cv-library-select').value,'');
 });
@@ -102,6 +108,67 @@ function uploadRuntime(names) {
   return state;
 }
 const submitUploads=state=>state.run("$('#library-upload-form').onsubmit({preventDefault(){}})");
+
+function editorRuntime() {
+  const state=runtime();
+  state.context.testElements=Object.fromEntries(['company','title','url','jd','applied_date','status','notes','new_letter','submitted_date','document_label','cv_library_id'].map(k=>[k,{value:k==='company'?'Acme':k==='title'?'Analyst':''}]));
+  state.run(`$('#application-form').elements=testElements;
+    editing='app1'; $('#editor').open=true;
+    editingDocuments=[{id:'doc1',name:'CV <English>.pdf',kind:'cv',size:1024,label:'Version 1',submitted_date:'2026-10-27'}];
+    renderEditingDocuments();
+    globalThis.calls=[]; globalThis.allowDelete=false;
+    confirmAction=async()=>allowDelete; reload=async()=>{}; toast=()=>{};
+    api=async(path,payload)=>{if(path==='/api/info')return {features:{delete_documents:true}};calls.push({path,payload});return {id:'app1',safety_backup:'before-document-delete_test.zip'};};`);
+  return state;
+}
+const markDocument=state=>state.run("$('#existing-documents').onclick({target:{closest:()=>({dataset:{toggleDocument:'doc1'}})}})");
+const saveEditor=state=>state.run("$('#application-form').onsubmit({preventDefault(){},target:{elements:testElements}})");
+
+test('archived files are marked locally, undo restores the draft and names are escaped',()=>{
+  const state=editorRuntime(),snapshot=state.run('formSnapshot()');
+  assert.match(state.nodes.get('#existing-documents').innerHTML,/CV &lt;English&gt;.pdf/);
+  assert.equal(state.nodes.get('#archived-documents-block').hidden,false);
+  markDocument(state);
+  assert.match(state.nodes.get('#existing-documents').innerHTML,/待删除（保存后生效）/);
+  assert.notEqual(state.run('formSnapshot()'),snapshot);
+  assert.equal(state.context.calls.length,0);
+  markDocument(state);
+  assert.equal(state.run('formSnapshot()'),snapshot);
+  assert.equal(state.run('editingDocuments.length'),1);
+});
+
+test('canceling deletion confirmation preserves the open draft and sends no request',async()=>{
+  const state=editorRuntime();markDocument(state);
+  await saveEditor(state);
+  assert.equal(state.context.calls.length,0);
+  assert.equal(state.nodes.get('#editor').open,true);
+  assert.equal(state.run("removedDocumentIds.has('doc1')"),true);
+  assert.equal(state.nodes.get('#save').disabled,false);
+});
+
+test('confirmed save submits only marked file IDs and existing draft fields',async()=>{
+  const state=editorRuntime();markDocument(state);
+  state.run("testElements.notes.value='Keep draft'; allowDelete=true; language='en'; renderEditingDocuments();");
+  assert.match(state.nodes.get('#existing-documents').innerHTML,/Undo deletion/);
+  await saveEditor(state);
+  assert.equal(state.context.calls.length,1);
+  const {path,payload}=state.context.calls[0];
+  assert.equal(path,'/api/applications/app1');
+  assert.equal(payload.remove_document_ids.join(),'doc1');
+  assert.equal(payload.confirm_document_delete,'DELETE');
+  assert.equal(payload.notes,'Keep draft');
+  assert.equal(state.nodes.get('#editor').open,false);
+  assert.equal(state.run("historyEvent('保存记录；删除 1 份归档材料')"),'Record saved; Archived files deleted: 1');
+});
+
+test('older running server cannot silently accept a pending file deletion',async()=>{
+  const state=editorRuntime();markDocument(state);
+  state.run("allowDelete=true; api=async()=>({version:'1.4.1'});");
+  await saveEditor(state);
+  assert.equal(state.nodes.get('#editor').open,true);
+  assert.match(state.nodes.get('#form-message').textContent,/请重开 JobArchive/);
+  assert.equal(state.run("removedDocumentIds.has('doc1')"),true);
+});
 
 test('CV library multi-select uploads every file with its own label and preserves application choice',async()=>{
   const state=uploadRuntime(['English.pdf','Chinese.docx']);

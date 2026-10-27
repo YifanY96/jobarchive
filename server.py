@@ -34,7 +34,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 ROOT = Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))
-VERSION = '1.4.1'
+VERSION = '1.4.3'
 TRANSLATIONS = json.loads((ROOT/'web'/'translations.json').read_text(encoding='utf-8-sig'))
 STATUSES = ['待投递', '已投递', '初筛', '笔试', '面试', 'Offer', '已拒绝', '已撤回']
 MAX_FILE = 25 * 1024 * 1024
@@ -274,7 +274,18 @@ class Archive:
             return result
 
     def save(self, payload, aid=None):
+        # Keep validation, backups, commits and file cleanup ordered with restore.
+        with LOCK:
+            return self._save(payload, aid)
+
+    def _save(self, payload, aid=None):
         old = self.application(aid) if aid else None
+        remove_ids = payload.get('remove_document_ids', [])
+        if (not isinstance(remove_ids,list) or len(remove_ids)>10000 or
+                any(not valid_id(did) for did in remove_ids) or len(set(remove_ids))!=len(remove_ids)):
+            raise ValueError('待删除文件编号无效')
+        if remove_ids and (not old or payload.get('confirm_document_delete')!='DELETE'):
+            raise ValueError('请先确认删除所选归档文件')
         fields = {k: text(payload.get(k, ''), 200000 if k in ('jd','notes') else 4000)
                   for k in ('company', 'title', 'url', 'jd', 'applied_date', 'status', 'notes')}
         if not fields['company'] or not fields['title']:
@@ -314,9 +325,9 @@ class Archive:
             prepared.append((ID(),'letter','动机信_'+(fields['applied_date'] or date.today().isoformat())+'.txt',
                              letter.encode('utf-8'),letter_date,
                              text(payload.get('document_label','正文归档'),200)))
-        written = []
+        written = []; removed = []; safety_backup = None
         try:
-            with LOCK, self.connect() as c:
+            with self.connect() as c:
                 if old and not c.execute('SELECT 1 FROM applications WHERE id=?',(aid,)).fetchone():
                     raise ValueError('这条投递已删除，请刷新列表')
                 cid = payload.get('cv_library_id','')
@@ -329,6 +340,14 @@ class Archive:
                     label = text(payload.get('document_label',''),200) or template['label']
                     # Always copy: a later library removal must not affect submitted CVs.
                     prepared.append((ID(),'cv',template['name'],raw,submitted,label))
+                for did in remove_ids:
+                    row = c.execute('SELECT * FROM documents WHERE id=? AND application_id=?',(did,aid)).fetchone()
+                    if not row:
+                        raise ValueError('所选文件已不存在或不属于这条投递，请刷新后重试')
+                    removed.append(dict(row))
+                if removed:
+                    # Back up committed records and bytes before any changes.
+                    safety_backup = self.safety_backup('before-document-delete')
                 stamp = NOW()
                 c.execute('''INSERT INTO applications VALUES(?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET company=excluded.company,title=excluded.title,
@@ -348,13 +367,26 @@ class Archive:
                      'status':'状态','notes':'备注'}[k] for k in changed) if changed else '保存记录')
                 if prepared:
                     event += f'；归档 {len(prepared)} 份新材料'
+                snapshot = dict(fields)
+                if removed:
+                    c.executemany('DELETE FROM documents WHERE id=? AND application_id=?',[(d['id'],aid) for d in removed])
+                    event += f'；删除 {len(removed)} 份归档材料'
+                    snapshot['removed_documents'] = removed
                 c.execute('INSERT INTO history VALUES(?,?,?,?,?)',
-                    (ID(),aid,event,json.dumps(fields,ensure_ascii=False),stamp))
+                    (ID(),aid,event,json.dumps(snapshot,ensure_ascii=False),stamp))
         except Exception:
             for p in written:
                 p.unlink(missing_ok=True)
             raise
-        return self.application(aid)
+        result = self.application(aid)
+        if removed:
+            result['safety_backup'] = safety_backup
+            for doc in removed:
+                try:
+                    (self.files/doc['id']).unlink(missing_ok=True)
+                except OSError:
+                    result['warning'] = '文件已从档案移除，但未能从磁盘清除；删除前备份已保留'
+        return result
 
     def backup(self):
         with LOCK:
@@ -782,7 +814,7 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/mails': self.json(sorted(store.all('mails'),key=lambda x:x['received_at'],reverse=True)); return
             if path=='/api/gmail': self.json(self.server.gmail.status()); return
             if path=='/api/info':
-                self.json({'data_dir':str(store.dir),'version':VERSION,'language':language,'desktop':getattr(self.server,'desktop',False),'gmail':self.server.gmail.status()}); return
+                self.json({'data_dir':str(store.dir),'version':VERSION,'language':language,'desktop':getattr(self.server,'desktop',False),'gmail':self.server.gmail.status(),'features':{'delete_documents':True}}); return
             if path=='/api/backup':
                 self.send_bytes(store.backup(),'application/zip',extra={'Content-Disposition':
                     'attachment; filename="JobArchive-'+date.today().isoformat()+'.zip"'}); return

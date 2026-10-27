@@ -129,10 +129,10 @@ def main():
                     deadline=time.monotonic()+15
                     while window.evaluate_js("document.documentElement.dataset.ready")!='true' and time.monotonic()<deadline:
                         time.sleep(.1)
-                    page=window.evaluate_js("({title:document.title,heading:document.getElementById('page-title').textContent,bridge:typeof window.pywebview.api.export==='function',token:!!document.querySelector('meta[name=archive-token]').content,library:!!document.getElementById('cv-library-select'),libraryNav:!!document.querySelector('[data-view=library]'),multiUpload:document.getElementById('library-file').multiple,uploadQueue:!!document.getElementById('library-upload-list')})")
+                    page=window.evaluate_js("({title:document.title,heading:document.getElementById('page-title').textContent,bridge:typeof window.pywebview.api.export==='function',token:!!document.querySelector('meta[name=archive-token]').content,library:!!document.getElementById('cv-library-select'),libraryNav:!!document.querySelector('[data-view=library]'),multiUpload:document.getElementById('library-file').multiple,uploadQueue:!!document.getElementById('library-upload-list'),archivedFiles:!!document.getElementById('existing-documents')})")
                     req=Request(http.origin+'/api/info',headers={'X-Archive-Token':http.token})
                     with urlopen(req,timeout=5) as r:info=json.load(r)
-                    (data_dir/'smoke-result.json').write_text(json.dumps({'ok':page['heading']==server.translate('投递档案',language) and page['bridge'] and page['token'] and page['library'] and page['libraryNav'] and page['multiUpload'] and page['uploadQueue'] and info['desktop'],'page':page,'version':info['version']},ensure_ascii=False),encoding='utf-8')
+                    (data_dir/'smoke-result.json').write_text(json.dumps({'ok':page['heading']==server.translate('投递档案',language) and page['bridge'] and page['token'] and page['library'] and page['libraryNav'] and page['multiUpload'] and page['uploadQueue'] and page['archivedFiles'] and info['features']['delete_documents'] and info['desktop'],'page':page,'version':info['version']},ensure_ascii=False),encoding='utf-8')
                 except Exception as exc:
                     (data_dir/'smoke-result.json').write_text(json.dumps({'ok':False,'error':str(exc)},ensure_ascii=False),encoding='utf-8')
                 finally:window.destroy()

@@ -84,6 +84,7 @@ let apps = [], mails = [], library = [], selected = null, editing = null, mailSe
 let librarySaving = false, libraryUploads = [];
 let nextPage = '', view = 'applications', desktop = false, language = 'zh-CN', translations = {};
 let selectedRecord = null, detailRequest = 0, editorSnapshot = '', editorSession = 0, saving = false;
+let editingDocuments = [], removedDocumentIds = new Set();
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function t(key, values = {}) {
   const entry = translations[key];
@@ -135,6 +136,7 @@ function translatePage() {
   $('#shutdown').textContent = t(desktop ? '关闭应用' : '停止本地服务');
   $('#close-hint').textContent = t(desktop ? '关闭应用窗口即停止服务，已保存的档案会保留在本机。' : '关闭网页不会停止本地服务。下次运行启动文件即可回到这里。');
   $('#editor-title').textContent = t(editing ? '编辑投递 / 新增提交材料' : '新建投递');
+  renderEditingDocuments();
   renderStats(); renderList();
   renderLibrary(); renderLibraryUploads();
   if (selectedRecord && selectedRecord.id === selected) renderDetail(selectedRecord);
@@ -176,7 +178,7 @@ function historyEvent(event) {
   if (language !== 'en') return event;
   const parts = event.split('；');
   const head = parts[0].startsWith('更新：') ? t('更新：') + parts[0].slice(3).split('、').map(s => t(s)).join(', ') : t(parts[0]);
-  return head + parts.slice(1).map(s => {const match = s.match(/^归档 (\d+) 份新材料$/); return '; '+(match ? t('归档 {count} 份新材料',{count:match[1]}) : s);}).join('');
+  return head + parts.slice(1).map(s => {const match = s.match(/^归档 (\d+) 份新材料$/), removed = s.match(/^删除 (\d+) 份归档材料$/); return '; '+(match ? t('归档 {count} 份新材料',{count:match[1]}) : removed ? t('删除 {count} 份归档材料',{count:removed[1]}) : s);}).join('');
 }
 function renderDetail(a) {
   $('#detail').innerHTML = `<div class="detail-head"><div><small>${esc(a.company)}</small><h2>${esc(a.title)}</h2>${badge(a.status)}</div><button id="edit-record">${esc(t('编辑 / 归档材料'))}</button></div><div class="meta"><span>${esc(t('投递日期'))}: ${esc(a.applied_date || t('未填写'))}</span><span>${esc(t('更新'))}: ${stamp(a.updated_at)}</span></div><div class="quick-status"><label for="quick-status">${esc(t('当前状态'))}</label><select id="quick-status">${statusOptions(a.status)}</select><button id="save-status" disabled>${esc(t('更新状态'))}</button></div>${a.url ? `<a href="${esc(a.url)}" target="_blank" rel="noreferrer">${esc(t('打开投递网页 ↗'))}</a>` : ''}<h3>${esc(t('职位描述'))}</h3><div class="prose">${esc(a.jd || t('暂无 JD，可编辑或从网页抓取。'))}</div>${a.notes ? `<h3>${esc(t('备注'))}</h3><div class="prose">${esc(a.notes)}</div>` : ''}<h3>${esc(t('实际提交材料 · {count} 份',{count:a.documents.length}))}</h3>${a.documents.map(d => `<div class="file"><div><a href="/files/${d.id}">${esc(d.name)} ↓</a><small>${esc(t(d.kind === 'cv' ? 'CV' : d.kind === 'letter' ? '动机信' : '其他'))} · ${esc(d.submitted_date || t('未填日期'))} · ${(d.size/1024).toFixed(1)} KB ${esc(d.label)}</small><small>${esc(t('归档'))}: ${stamp(d.created_at)}</small></div></div>`).join('') || `<p class="hint">${esc(t('尚未归档材料。编辑记录即可新增文件。'))}</p>`}<h3>${esc(t('关联邮件 · {count} 封',{count:a.mails.length}))}</h3>${a.mails.map(m => `<button class="record" data-mail="${m.id}"><strong>${esc(m.subject || t('（无主题）'))}</strong><small>${esc(m.sender)}</small></button>`).join('') || `<p class="hint">${esc(t('在求职邮箱中把邮件关联到这条投递。'))}</p>`}<h3>${esc(t('更新历史'))}</h3>${a.history.map(h => `<details class="history"><summary>${stamp(h.created_at)} · ${esc(historyEvent(h.event))}</summary><pre class="prose">${esc(historyText(h.snapshot))}</pre></details>`).join('')}`;
@@ -186,36 +188,62 @@ function renderDetail(a) {
   $('#detail').querySelectorAll('[data-mail]').forEach(e => e.onclick = async () => {try {showView('mail'); await loadMails(); showMail(e.dataset.mail);} catch(error) {toast(error.message);}});
 }
 function historyText(raw) {
-  try {const s = JSON.parse(raw); return [['状态',t(s.status)],['日期',s.applied_date],['公司',s.company],['职位',s.title],['网页',s.url],['备注',s.notes]].map(([label,value]) => `${t(label)}: ${value ?? ''}`).join('\n') + '\n\nJD:\n' + s.jd;}
+  try {const s = JSON.parse(raw); return [['状态',t(s.status)],['日期',s.applied_date],['公司',s.company],['职位',s.title],['网页',s.url],['备注',s.notes]].map(([label,value]) => `${t(label)}: ${value ?? ''}`).join('\n') + '\n\nJD:\n' + s.jd + (s.removed_documents?.length ? '\n\n'+t('删除的归档文件')+':\n'+s.removed_documents.map(d => d.name).join('\n') : '');}
   catch {return raw;}
 }
-function formSnapshot() {const f = $('#application-form'); return JSON.stringify([...fields,'submitted_date','document_label','new_letter','cv_library_id'].map(k => f.elements[k].value).concat([...$('#cv-files').files,...$('#letter-files').files].map(f => [f.name,f.size,f.lastModified])));}
+function renderEditingDocuments() {
+  $('#archived-documents-block').hidden = !editing;
+  $('#existing-documents').innerHTML = editingDocuments.map(d => {
+    const removed = removedDocumentIds.has(d.id);
+    return `<div class="file archived-document ${removed ? 'pending-delete' : ''}"><div><a href="/files/${d.id}">${esc(d.name)} ↓</a><small>${esc(t(d.kind === 'cv' ? 'CV' : d.kind === 'letter' ? '动机信' : '其他'))} · ${esc(d.submitted_date || t('未填日期'))} · ${(d.size/1024).toFixed(1)} KB ${esc(d.label)}</small>${removed ? `<small class="delete-note">${esc(t('待删除（保存后生效）'))}</small>` : ''}</div><button type="button" data-toggle-document="${d.id}" class="${removed ? '' : 'danger'}" ${saving ? 'disabled' : ''}>${esc(t(removed ? '撤销删除' : '删除文件'))}</button></div>`;
+  }).join('') || `<p class="hint">${esc(t('这条投递暂无已归档文件。'))}</p>`;
+}
+$('#existing-documents').onclick = event => {
+  const button = event.target.closest('[data-toggle-document]');
+  if (!button || saving || !editing) return;
+  const id = button.dataset.toggleDocument;
+  if (!editingDocuments.some(d => d.id === id)) return;
+  if (removedDocumentIds.has(id)) removedDocumentIds.delete(id); else removedDocumentIds.add(id);
+  renderEditingDocuments();
+};
+function formSnapshot() {const f = $('#application-form'); return JSON.stringify([...fields,'submitted_date','document_label','new_letter','cv_library_id'].map(k => f.elements[k].value).concat([...$('#cv-files').files,...$('#letter-files').files].map(f => [f.name,f.size,f.lastModified]),[...removedDocumentIds].sort()));}
 function dirtyEditor() {return $('#editor').open && formSnapshot() !== editorSnapshot;}
 async function closeEditor() {if (saving) return; if (dirtyEditor() && !await confirmAction(t('有尚未保存的修改，确定放弃吗？'))) return; editorSession++; $('#editor').close();}
 function openEditor(a = null) {
   editing = a?.id || null; editorSession++;
+  editingDocuments = a?.documents || []; removedDocumentIds = new Set(); renderEditingDocuments();
   const f = $('#application-form'); f.reset();
   renderLibraryOptions();
   for (const k of fields) f.elements[k].value = a?.[k] ?? (k === 'status' ? '已投递' : k === 'applied_date' ? today() : '');
   f.elements.submitted_date.value = a?.applied_date || today();
   $('#editor-title').textContent = t(a ? '编辑投递 / 新增提交材料' : '新建投递');
   $('#delete-record').hidden = !editing;
-  $('#form-message').textContent = ''; $('#fetch-jd').disabled = false; editorSnapshot = formSnapshot(); $('#editor').showModal();
+  $('#form-message').textContent = ''; $('#fetch-jd').disabled = false; editorSnapshot = formSnapshot();
+  const dialog = $('#editor'); dialog.showModal();
+  // The reused dialog may retain its previous scroll offset and focused field.
+  f.elements.company.focus({preventScroll:true});
+  dialog.scrollTop = 0; dialog.scrollLeft = 0;
+  for (const key of ['jd','notes','new_letter']) f.elements[key].scrollTop = 0;
 }
 async function file64(file) {if (file.size > 25*1024*1024) throw Error(t('{name} 超过 25 MB',{name:file.name})); return new Promise((resolve,reject) => {const reader = new FileReader(); reader.onload = () => resolve(reader.result.split(',')[1]); reader.onerror = () => reject(Error(t('文件读取失败'))); reader.readAsDataURL(file);});}
 $('#application-form').onsubmit = async e => {
   e.preventDefault(); if (saving) return;
   saving = true; $('#save').disabled = true; $('#close-editor').disabled = true; $('#delete-record').disabled = true; $('#form-message').textContent = t('正在归档，请稍候…');
+  renderEditingDocuments();
   try {
+    const removeIds = [...removedDocumentIds];
+    if (removeIds.length && !(await api('/api/info')).features?.delete_documents) throw Error(t('请重开 JobArchive 后再删除文件，当前服务尚未更新。'));
+    if (removeIds.length && !await confirmAction(t('保存时将删除 {count} 份已归档文件：\n{names}\n\n删除前会自动完整备份，备份失败则不保存。CV 库原文件及其他投递不受影响。',{count:removeIds.length,names:editingDocuments.filter(d => removedDocumentIds.has(d.id)).map(d => d.name).join('\n')}),'确认删除')) {$('#form-message').textContent = ''; return;}
     const f = e.target, payload = Object.fromEntries(fields.map(k => [k,f.elements[k].value]));
     payload.new_letter = f.elements.new_letter.value; payload.submitted_date = f.elements.submitted_date.value; payload.document_label = f.elements.document_label.value; payload.cv_library_id = f.elements.cv_library_id.value; payload.uploads = [];
+    if (removeIds.length) {payload.remove_document_ids = removeIds; payload.confirm_document_delete = 'DELETE';}
     const files = [['#cv-files','cv'],['#letter-files','letter']].flatMap(([selector,kind]) => [...$(selector).files].map(file => ({file,kind})));
     if (files.length + (payload.cv_library_id ? 1 : 0) > 10) throw Error(t('一次最多归档 10 个文件'));
     for (const {file,kind} of files) payload.uploads.push({name:file.name,kind,data:await file64(file),submitted_date:payload.submitted_date,label:payload.document_label});
     const a = await api('/api/applications'+(editing ? '/'+editing : ''),payload);
-    selected = a.id; editorSession++; $('#editor').close(); await reload(); toast(t('已保存，新增材料已独立归档'));
+    selected = a.id; editorSession++; $('#editor').close(); await reload(); toast(a.warning ? t(a.warning) : removeIds.length ? t('已保存。已删除 {count} 份文件，删除前备份保存在 data/backups/{name}',{count:removeIds.length,name:a.safety_backup}) : t('已保存，新增材料已独立归档'));
   } catch(error) {$('#form-message').textContent = error.message;}
-  finally {saving = false; $('#save').disabled = false; $('#close-editor').disabled = false; $('#delete-record').disabled = false;}
+  finally {saving = false; $('#save').disabled = false; $('#close-editor').disabled = false; $('#delete-record').disabled = false; renderEditingDocuments();}
 };
 async function deleteEditingRecord() {
   if (!editing || saving) return;
@@ -271,7 +299,11 @@ function showView(name) {
 }
 function renderLibraryOptions() {
   const select = $('#cv-library-select'), value = select.value;
-  select.innerHTML = `<option value="">${esc(t('不从库内添加 CV'))}</option>` + library.map(cv => `<option value="${cv.id}">${esc(cv.label)} · ${esc(cv.name)} · ${esc(cv.created_at.slice(0,10))}</option>`).join('');
+  select.innerHTML = `<option value="">${esc(t('不从库内添加 CV'))}</option>` + library.map(cv => {
+    const label = cv.label.trim() || cv.name;
+    const name = label === cv.name ? label : `${label} · ${cv.name}`;
+    return `<option value="${cv.id}">${esc(name)} · ${esc(cv.created_at.slice(0,10))}</option>`;
+  }).join('');
   select.value = library.some(cv => cv.id === value) ? value : '';
 }
 function renderLibrary() {
