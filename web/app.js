@@ -125,6 +125,7 @@ function translatePage() {
   document.querySelectorAll('[data-i18n]').forEach(e => e.textContent = t(e.dataset.i18n));
   document.querySelectorAll('[data-placeholder]').forEach(e => e.placeholder = t(e.dataset.placeholder));
   document.querySelectorAll('[data-aria]').forEach(e => e.setAttribute('aria-label', t(e.dataset.aria)));
+  updateSearchPlaceholder();
   ArchiveDates.refresh();
   const status = $('#status-filter').value, editorStatus = $('#application-form').elements.status.value || '已投递';
   $('#status-filter').innerHTML = `<option value="">${esc(t('全部状态'))}</option>` + statusOptions(status);
@@ -148,9 +149,14 @@ function renderStats() {
   const counts = [['全部机会',apps.length],['已投递',apps.filter(a => a.status !== '待投递').length],['进行中',apps.filter(a => ['初筛','笔试','面试'].includes(a.status)).length],['收获 Offer',apps.filter(a => a.status === 'Offer').length]];
   $('#stats').innerHTML = counts.map(([name,n]) => `<div class="stat"><span>${esc(t(name))}</span><strong>${n}</strong></div>`).join('');
 }
+function updateSearchPlaceholder() {
+  const key = {company:'搜索公司名',title:'搜索岗位名'}[$('#search-scope').value] || '搜索公司名或职位名';
+  $('#search').dataset.placeholder = key; $('#search').placeholder = t(key);
+}
 function filtered() {
   const q = $('#search').value.trim().toLocaleLowerCase(), status = $('#status-filter').value, from = ArchiveDates.valid($('#date-from').value) ? $('#date-from').value : '', to = ArchiveDates.valid($('#date-to').value) ? $('#date-to').value : '', key = $('#sort').value;
-  return apps.filter(a => (!q || ['company','title'].some(k => String(a[k] || '').toLocaleLowerCase().includes(q))) && (!status || a.status === status) && (!from || a.applied_date >= from) && (!to || (a.applied_date && a.applied_date <= to)))
+  const scope = $('#search-scope').value, searchFields = scope === 'company' ? ['company'] : scope === 'title' ? ['title'] : ['company','title'];
+  return apps.filter(a => (!q || searchFields.some(k => String(a[k] || '').toLocaleLowerCase().includes(q))) && (!status || a.status === status) && (!from || a.applied_date >= from) && (!to || (a.applied_date && a.applied_date <= to)))
     .sort((a,b) => key === 'company' ? a[key].localeCompare(b[key],language) : b[key].localeCompare(a[key]));
 }
 function emptyDetail() {$('#detail').innerHTML = `<div class="empty"><b>${esc(t('你的求职时间线'))}</b>${esc(t('选择一条投递，查看 JD、提交材料和状态历史。'))}<br>${esc(t('所有文件都保留独立版本。'))}</div>`;}
@@ -158,7 +164,7 @@ function renderList() {
   const rows = filtered();
   if (selected && !rows.some(a => a.id === selected)) {selected = null; selectedRecord = null; detailRequest++;}
   $('#result-count').textContent = t('显示 {count} / {total} 条投递', {count:rows.length,total:apps.length});
-  $('#clear-filters').hidden = !['search','status-filter','date-from','date-to'].some(id => $('#'+id).value);
+  $('#clear-filters').hidden = !(['search','status-filter','date-from','date-to'].some(id => $('#'+id).value) || ['company','title'].includes($('#search-scope').value));
   $('#list').innerHTML = rows.length ? rows.map(a => `<button class="record ${selected === a.id ? 'selected' : ''}" data-id="${a.id}" aria-pressed="${selected === a.id}"><div class="record-top"><strong>${esc(a.company)}</strong>${badge(a.status)}</div><p>${esc(a.title)}</p><small>${esc(a.applied_date ? t('投递于 {date}',{date:a.applied_date}) : t('尚未填写投递日期'))}</small></button>`).join('') : `<div class="empty"><b>${esc(t(apps.length ? '没有匹配的投递' : '从第一份投递开始'))}</b>${esc(t(apps.length ? '试试调整搜索或筛选条件。' : '点击右上角「新建投递」，保存网页与实际提交的材料。'))}</div>`;
   $('#list').querySelectorAll('[data-id]').forEach(e => e.onclick = () => detail(e.dataset.id).catch(e => toast(e.message)));
   if (!selected) emptyDetail();
@@ -418,7 +424,8 @@ $('#editor').addEventListener('cancel',e => {e.preventDefault(); closeEditor();}
 window.addEventListener('beforeunload',e => {if (dirtyEditor() || saving || librarySaving) {e.preventDefault(); e.returnValue = '';}});
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => showView(b.dataset.view));
 for (const id of ['search','status-filter','date-from','date-to','sort']) $('#'+id).addEventListener('input',renderList);
-$('#clear-filters').onclick = () => {for (const id of ['search','status-filter','date-from','date-to']) $('#'+id).value = ''; ArchiveDates.refresh(); renderList(); $('#search').focus();};
+$('#search-scope').onchange = () => {updateSearchPlaceholder(); renderList();};
+$('#clear-filters').onclick = () => {for (const id of ['search','status-filter','date-from','date-to']) $('#'+id).value = ''; $('#search-scope').value = 'all'; updateSearchPlaceholder(); ArchiveDates.refresh(); renderList(); $('#search').focus();};
 $('#mail-search').oninput = renderMails;
 document.addEventListener('keydown',e => {if (!(e.ctrlKey || e.metaKey) || e.altKey || $('#editor').open || $('#library-editor').open || $('#confirmation').open) return; if (e.key.toLowerCase() === 'k') {e.preventDefault(); showView('applications'); $('#search').focus(); $('#search').select();} if (e.key.toLowerCase() === 'n') {e.preventDefault(); showView('applications'); openEditor();}});
 document.addEventListener('click',e => {const a = e.target.closest('a[href^="/files/"],a[href^="/cv-files/"]'); if (desktop && a) {e.preventDefault(); nativeExport(a.getAttribute('href').startsWith('/cv-files/') ? 'library-cv' : 'document',a.getAttribute('href').split('/').pop()).catch(error => toast(error.message));}});

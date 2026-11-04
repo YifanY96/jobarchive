@@ -34,7 +34,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 ROOT = Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))
-VERSION = '1.4.3'
+VERSION = '1.4.4'
 TRANSLATIONS = json.loads((ROOT/'web'/'translations.json').read_text(encoding='utf-8-sig'))
 STATUSES = ['待投递', '已投递', '初筛', '笔试', '面试', 'Offer', '已拒绝', '已撤回']
 MAX_FILE = 25 * 1024 * 1024

@@ -12,3 +12,5 @@ nav button{display:flex;align-items:center;gap:12px;white-space:normal;line-heig
 .library-upload-list{display:grid;gap:12px;margin-top:18px}.library-upload-item{padding:14px;border:1px solid var(--border);border-radius:8px;background:#fafbf6}.library-upload-item label{display:grid;gap:8px}.library-upload-item .mono{font-size:12px}.upload-status{display:block;margin-top:8px;overflow-wrap:anywhere}.upload-status.done{color:#315d32}.upload-status.failed{color:#9a4038}
 
 .archived-document{align-items:center;flex-wrap:wrap}.archived-document>div{flex:1;min-width:180px;overflow-wrap:anywhere}.archived-document a{color:var(--green)}.archived-document.pending-delete{background:#fff5f3;padding:12px;border-radius:6px}.pending-delete a{text-decoration:line-through}.delete-note{color:#9a4038}#confirm-message{white-space:pre-wrap}
+
+.application-filters #search-scope{flex:0 1 160px;min-width:140px}

@@ -335,5 +335,11 @@
   "请先确认删除所选归档文件": "Confirm deletion of the selected archived files first",
   "所选文件已不存在或不属于这条投递，请刷新后重试": "A selected file no longer exists or belongs to another application. Refresh and try again.",
   "文件已从档案移除，但未能从磁盘清除；删除前备份已保留": "The file was removed from this archive, but could not be removed from disk. The safety backup was kept.",
-  "请重开 JobArchive 后再删除文件，当前服务尚未更新。": "Restart JobArchive before deleting files. The running service has not been updated yet."
+  "请重开 JobArchive 后再删除文件，当前服务尚未更新。": "Restart JobArchive before deleting files. The running service has not been updated yet.",
+  "搜索范围": "Search in",
+  "公司＋岗位": "Company + job title",
+  "仅公司名": "Company only",
+  "仅岗位名": "Job title only",
+  "搜索公司名": "Search companies",
+  "搜索岗位名": "Search job titles"
 }

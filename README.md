@@ -2,11 +2,15 @@
 
 支持简体中文 / English、本机保存的个人求职管理工具，用于记录投递网页、JD、实际提交的 CV 与动机信、投递状态，以及关联的 Gmail 邮件。
 
-**当前桌面源码版本 1.4.3**：本机桌面的 JobArchive 快捷方式使用现有桌面运行环境。源码桌面模式需要 Python 3.12+、`desktop-requirements.txt` 中的依赖和 Microsoft Edge WebView2，运行 `python desktop.py`。公开发布版本见 [Releases](https://github.com/YifanY96/jobarchive/releases)。软件仅监听 `127.0.0.1`；源码包不包含个人数据或本机运行环境。
+**当前桌面源码版本 1.4.4**：本机桌面的 JobArchive 快捷方式使用现有桌面运行环境。源码桌面模式需要 Python 3.12+、`desktop-requirements.txt` 中的依赖和 Microsoft Edge WebView2，运行 `python desktop.py`。公开发布版本见 [Releases](https://github.com/YifanY96/jobarchive/releases)。软件仅监听 `127.0.0.1`；源码包不包含个人数据或本机运行环境。
 
 `JobArchive.exe` 与 `_internal` 文件夹必须一起保留。桌面版自带 Python 运行环境，使用本机已有的 Microsoft Edge WebView2，不需要安装 Python、Node 或 Docker，也不需要管理员权限。关闭窗口即停止该实例的本地服务，记录已在保存时写入磁盘；重复启动会回到现有窗口。现有 `data` 文件夹继续使用，无需迁移。备份和附件下载通过 Windows「另存为」对话框保存。
 
 v1.3.0 Windows 构建为预发布：本机的应用控制阻止了新 EXE 启动，打包版启动验证未完成；桌面源码模式已验证，可在安装桌面依赖后运行 `python desktop.py`。
+
+## 1.4.4：按公司名或岗位名搜索
+
+搜索栏旁新增搜索范围：默认「公司＋岗位」，也可选「仅公司名」或「仅岗位名」，输入提示随范围和界面语言变化。搜索仍不区分大小写，按连续部分文字匹配，可与状态和日期筛选同时使用；「清除筛选」会同时清空关键词、状态、日期并恢复默认范围。
 
 ## 1.4.3：新建 / 编辑窗口回到顶部
 

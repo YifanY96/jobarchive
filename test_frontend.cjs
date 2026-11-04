@@ -9,7 +9,7 @@ const code = fs.readFileSync(path.join(__dirname,'web/app.js'),'utf8').replace(/
 function runtime() {
   const nodes = new Map();
   const element = selector => {
-    if (!nodes.has(selector)) nodes.set(selector,{value:selector === '#sort' ? 'updated_at' : '',content:'test-token',addEventListener(){},close(){this.open=false;},files:[],dataset:{}});
+    if (!nodes.has(selector)) nodes.set(selector,{value:selector === '#sort' ? 'updated_at' : '',content:'test-token',addEventListener(){},querySelectorAll(){return [];},focus(){},close(){this.open=false;},files:[],dataset:{}});
     return nodes.get(selector);
   };
   const context = vm.createContext({document:{querySelector:element,querySelectorAll:()=>[],addEventListener(){}},window:{addEventListener(){}},setTimeout,clearTimeout});
@@ -18,7 +18,7 @@ function runtime() {
   vm.runInContext('translations = catalog;',context);
   return {context,nodes,run:source=>vm.runInContext(source,context)};
 }
-test('search matches company/title only, ignoring case, JD, notes and URLs',()=>{
+test('search scope separates company/title, combines with filters and resets correctly',()=>{
   const {run,nodes}=runtime();
   run(`apps = [
     {id:'one',company:'BIL Demo',title:'Analyst',jd:'',notes:'',url:'',status:'已投递',applied_date:'2026-10-02',updated_at:'2'},
@@ -27,10 +27,28 @@ test('search matches company/title only, ignoring case, JD, notes and URLs',()=>
   ];`);
   nodes.get('#search').value='  bIl  ';
   assert.equal(run('filtered().map(a=>a.id).join()'),'one,three');
+  nodes.get('#search-scope').value='company';
+  run("$('#search-scope').onchange()");
+  assert.equal(run('filtered().map(a=>a.id).join()'),'one');
+  assert.equal(nodes.get('#search').placeholder,'搜索公司名');
+  assert.equal(nodes.get('#clear-filters').hidden,false);
+  nodes.get('#search-scope').value='title';
+  run("$('#search-scope').onchange()");
+  assert.equal(run('filtered().map(a=>a.id).join()'),'three');
+  assert.equal(nodes.get('#search').placeholder,'搜索岗位名');
+  run("language='en'; updateSearchPlaceholder()");
+  assert.equal(nodes.get('#search').placeholder,'Search job titles');
+  assert.equal(nodes.get('#search-scope').value,'title');
   nodes.get('#status-filter').value='待投递';
   assert.equal(run('filtered().map(a=>a.id).join()'),'three');
   nodes.get('#date-from').value='2026-10-01';
   assert.equal(run('filtered().length'),0);
+  run("$('#clear-filters').onclick()");
+  assert.equal(nodes.get('#search-scope').value,'all');
+  assert.equal(nodes.get('#search').value,'');
+  assert.equal(nodes.get('#clear-filters').hidden,true);
+  assert.equal(run('filtered().length'),3);
+  assert.equal(nodes.get('#search').placeholder,'Search company or job title');
 });
 test('English display keeps persisted Chinese statuses and historical content intact',()=>{
   const {run}=runtime(); run("language = 'en';");
