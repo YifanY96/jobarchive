@@ -59,6 +59,25 @@ test('English display keeps persisted Chinese statuses and historical content in
   run("language = 'zh-CN';");
   assert.equal(run("t('面试')"),'面试');
 });
+test('rejections are grouped by round and stage filters compose with company search',()=>{
+  const {run,nodes}=runtime();
+  run(`apps = [
+    {id:'late1',company:'Acme',title:'Analyst',status:'已拒绝',rejection_stage:'later_interview',applied_date:'2026-10-20',updated_at:'4'},
+    {id:'first',company:'Acme',title:'Capital',status:'已拒绝',rejection_stage:'first_interview',applied_date:'2026-10-20',updated_at:'3'},
+    {id:'late2',company:'Other',title:'Acme Analyst',status:'已拒绝',rejection_stage:'later_interview',applied_date:'2026-10-20',updated_at:'2'},
+    {id:'legacy',company:'Acme',title:'Analyst',status:'已拒绝',applied_date:'2026-10-20',updated_at:'1'},
+  ];
+  $('#status-filter').value='已拒绝'; renderList();`);
+  const html=nodes.get('#list').innerHTML;
+  assert.match(html,/后续面试后被拒 <span>\(2\)<\/span>.*data-id="late1".*data-id="late2".*首轮面试后被拒 <span>\(1\)<\/span>.*data-id="first"/);
+  assert.match(html,/被拒阶段未记录 <span>\(1\)<\/span>/);
+  nodes.get('#status-filter').value='rejected:later_interview';
+  nodes.get('#search').value='Acme'; nodes.get('#search-scope').value='company';
+  assert.equal(run('filtered().map(a=>a.id).join()'),'late1');
+  assert.equal(run("historyEvent('更新：状态；后续面试后被拒')"),'更新：状态；后续面试后被拒');
+  run("language='en'; renderList()");
+  assert.match(nodes.get('#list').innerHTML,/Rejected after a later interview/);
+});
 test('every static interface label has both language variants',()=>{
   const html=fs.readFileSync(path.join(__dirname,'web/index.html'),'utf8');
   for(const [,key] of html.matchAll(/data-(?:i18n|placeholder|aria)="([^"]+)"/g)) {
@@ -141,6 +160,14 @@ function editorRuntime() {
 }
 const markDocument=state=>state.run("$('#existing-documents').onclick({target:{closest:()=>({dataset:{toggleDocument:'doc1'}})}})");
 const saveEditor=state=>state.run("$('#application-form').onsubmit({preventDefault(){},target:{elements:testElements}})");
+
+test('editing can record the exact rejection round',async()=>{
+  const state=editorRuntime();
+  state.run("testElements.status.value='已拒绝'; $('#rejection-stage').value='final_interview'; toggleRejectionField();");
+  assert.equal(state.nodes.get('#rejection-stage-field').hidden,false);
+  await saveEditor(state);
+  assert.equal(state.context.calls[0].payload.rejection_stage,'final_interview');
+});
 
 test('archived files are marked locally, undo restores the draft and names are escaped',()=>{
   const state=editorRuntime(),snapshot=state.run('formSnapshot()');

@@ -341,5 +341,18 @@
   "仅公司名": "Company only",
   "仅岗位名": "Job title only",
   "搜索公司名": "Search companies",
-  "搜索岗位名": "Search job titles"
+  "搜索岗位名": "Search job titles",
+  "初筛前被拒": "Rejected before screening",
+  "初筛后被拒": "Rejected after screening",
+  "笔试后被拒": "Rejected after assessment",
+  "首轮面试后被拒": "Rejected after first interview",
+  "后续面试后被拒": "Rejected after a later interview",
+  "终面后被拒": "Rejected after final interview",
+  "面试后被拒（轮次未记录）": "Rejected after interview (round unknown)",
+  "Offer 后被拒": "Rejected after offer",
+  "被拒阶段未记录": "Rejection stage unknown",
+  "被拒阶段": "Rejection stage",
+  "按被拒阶段筛选": "Filter by rejection stage",
+  "自动判断或保留已有阶段": "Detect or keep existing stage",
+  "请选择有效的被拒阶段": "Choose a valid rejection stage"
 }

@@ -34,9 +34,16 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 ROOT = Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parent))
-VERSION = '1.4.4'
+VERSION = '1.4.5'
 TRANSLATIONS = json.loads((ROOT/'web'/'translations.json').read_text(encoding='utf-8-sig'))
 STATUSES = ['待投递', '已投递', '初筛', '笔试', '面试', 'Offer', '已拒绝', '已撤回']
+REJECTION_LABELS = {
+    'before_screening':'初筛前被拒', 'screening':'初筛后被拒', 'assessment':'笔试后被拒',
+    'first_interview':'首轮面试后被拒', 'later_interview':'后续面试后被拒',
+    'final_interview':'终面后被拒', 'interview':'面试后被拒（轮次未记录）',
+    'offer':'Offer 后被拒', 'unknown':'被拒阶段未记录',
+}
+REJECTION_FROM_STATUS = {'初筛':'screening', '笔试':'assessment', '面试':'interview', 'Offer':'offer'}
 MAX_FILE = 25 * 1024 * 1024
 MAX_BODY = 80 * 1024 * 1024
 MAX_BACKUP = 400 * 1024 * 1024
@@ -257,14 +264,45 @@ class Archive:
         if table not in TABLES:
             raise ValueError('未知数据表')
         with self.connect() as c:
-            return [dict(r) for r in c.execute(f'SELECT * FROM {table}')]
+            return [dict(r) for r in c.execute(f'SELECT * FROM {table}' + (' ORDER BY rowid' if table=='history' else ''))]
+
+    @staticmethod
+    def rejection_stages(c, aid=None):
+        # Existing history is sufficient for inference and travels in v2 backups.
+        query = '''SELECT h.application_id,
+            CASE WHEN json_valid(h.snapshot) THEN json_extract(h.snapshot, '$.status') END AS status,
+            CASE WHEN json_valid(h.snapshot) THEN json_extract(h.snapshot, '$.rejection_stage') END AS stage
+            FROM history h JOIN applications a ON a.id=h.application_id WHERE a.status='已拒绝' '''
+        if aid is not None:
+            query += 'AND a.id=? '
+        stages = {}
+        for app_id,status,stage in c.execute(query+'ORDER BY h.rowid', () if aid is None else (aid,)):
+            if status == '已拒绝':
+                if isinstance(stage,str) and stage in REJECTION_LABELS:
+                    stages[app_id] = stage
+            elif status in STATUSES:
+                stages[app_id] = REJECTION_FROM_STATUS.get(status,'unknown')
+        return stages
+
+    def applications(self):
+        with self.connect() as c:
+            c.execute('BEGIN')
+            stages = self.rejection_stages(c)
+            rows = [dict(r) for r in c.execute('SELECT * FROM applications')]
+        for row in rows:
+            if row['status']=='已拒绝':
+                row['rejection_stage'] = stages.get(row['id'],'unknown')
+        return rows
 
     def application(self, aid):
         with self.connect() as c:
+            c.execute('BEGIN')
             r = c.execute('SELECT * FROM applications WHERE id=?', (aid,)).fetchone()
             if not r:
                 raise ValueError('没有找到这条投递记录')
             result = dict(r)
+            if result['status']=='已拒绝':
+                result['rejection_stage'] = self.rejection_stages(c,aid).get(aid,'unknown')
             result['documents'] = [dict(x) for x in c.execute(
                 'SELECT * FROM documents WHERE application_id=? ORDER BY created_at DESC', (aid,))]
             result['history'] = [dict(x) for x in c.execute(
@@ -293,6 +331,11 @@ class Archive:
         valid_url(fields['url'])
         if fields['status'] not in STATUSES:
             raise ValueError('请选择有效的投递状态')
+        rejection_stage = payload.get('rejection_stage','')
+        if not isinstance(rejection_stage,str) or (rejection_stage and rejection_stage not in REJECTION_LABELS):
+            raise ValueError('请选择有效的被拒阶段')
+        if fields['status']=='已拒绝' and not rejection_stage:
+            rejection_stage = (old or {}).get('rejection_stage') or REJECTION_FROM_STATUS.get((old or {}).get('status'),'unknown')
         if fields['applied_date']:
             date.fromisoformat(fields['applied_date'])
         aid = aid or ID()
@@ -368,6 +411,10 @@ class Archive:
                 if prepared:
                     event += f'；归档 {len(prepared)} 份新材料'
                 snapshot = dict(fields)
+                if fields['status']=='已拒绝':
+                    snapshot['rejection_stage'] = rejection_stage
+                    if old and old.get('rejection_stage') != rejection_stage:
+                        event += '；'+REJECTION_LABELS[rejection_stage]
                 if removed:
                     c.executemany('DELETE FROM documents WHERE id=? AND application_id=?',[(d['id'],aid) for d in removed])
                     event += f'；删除 {len(removed)} 份归档材料'
@@ -808,7 +855,7 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/cv-library':
                 self.json(sorted(store.all('cv_library'),key=lambda row:row['created_at'],reverse=True)); return
             if path=='/api/session': self.json({'token':self.server.token,'statuses':STATUSES}); return
-            if path=='/api/applications': self.json(store.all('applications')); return
+            if path=='/api/applications': self.json(store.applications()); return
             if path.startswith('/api/applications/'):
                 self.json(store.application(path.rsplit('/',1)[1])); return
             if path=='/api/mails': self.json(sorted(store.all('mails'),key=lambda x:x['received_at'],reverse=True)); return
@@ -820,10 +867,11 @@ class Handler(BaseHTTPRequestHandler):
                     'attachment; filename="JobArchive-'+date.today().isoformat()+'.zip"'}); return
             if path=='/api/csv':
                 out=io.StringIO(newline=''); w=csv.writer(out)
-                fields=['company','title','url','applied_date','status','notes','jd']
-                w.writerow([translate(label,language) for label in ['公司','职位','投递网页','投递日期','状态','备注','职位描述']])
-                for row in store.all('applications'):
+                fields=['company','title','url','applied_date','status','notes','jd','rejection_stage']
+                w.writerow([translate(label,language) for label in ['公司','职位','投递网页','投递日期','状态','备注','职位描述','被拒阶段']])
+                for row in store.applications():
                     row['status']=translate(row['status'],language)
+                    row['rejection_stage']=translate(REJECTION_LABELS[row['rejection_stage']],language) if 'rejection_stage' in row else ''
                     w.writerow([("'"+str(row[k]) if str(row[k]).lstrip().startswith(('=','+','-','@')) else row[k]) for k in fields])
                 self.send_bytes(out.getvalue().encode('utf-8-sig'),'text/csv; charset=utf-8',extra={
                     'Content-Disposition':'attachment; filename="applications.csv"'}); return

@@ -14,3 +14,5 @@ nav button{display:flex;align-items:center;gap:12px;white-space:normal;line-heig
 .archived-document{align-items:center;flex-wrap:wrap}.archived-document>div{flex:1;min-width:180px;overflow-wrap:anywhere}.archived-document a{color:var(--green)}.archived-document.pending-delete{background:#fff5f3;padding:12px;border-radius:6px}.pending-delete a{text-decoration:line-through}.delete-note{color:#9a4038}#confirm-message{white-space:pre-wrap}
 
 .application-filters #search-scope{flex:0 1 160px;min-width:140px}
+
+.rejection-group{margin:10px 0 0;padding:9px 4px 0;border-top:1px solid var(--border);font-size:13px;color:#75463d}.rejection-group span{font-weight:400}.record-top{flex-wrap:wrap}.badge.bad{white-space:normal}

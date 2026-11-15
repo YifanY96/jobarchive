@@ -259,6 +259,34 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(len(self.store.update_status(a['id'],'面试')['history']),2)
         with self.assertRaises(ValueError):self.store.update_status(a['id'],'Interview')
         self.assertEqual(self.store.application(a['id'])['status'],'面试')
+    def test_rejection_stages_infer_legacy_history_without_guessing_rounds(self):
+        cases = [('初筛','screening'),('笔试','assessment'),('面试','interview'),('Offer','offer'),('已投递','unknown')]
+        expected = {}
+        for prior,stage in cases:
+            app=self.store.save({**self.payload(),'status':prior})
+            # Simulate an older rejection snapshot with only the original status field.
+            with self.store.connect() as c:
+                c.execute("UPDATE applications SET status='已拒绝' WHERE id=?",(app['id'],))
+                c.execute('INSERT INTO history VALUES(?,?,?,?,?)',(s.ID(),app['id'],'更新：状态',json.dumps({'status':'已拒绝'}),app['created_at']))
+            expected[app['id']]=stage
+            self.assertEqual(self.store.application(app['id'])['rejection_stage'],stage)
+        self.assertEqual({a['id']:a['rejection_stage'] for a in self.store.applications()},expected)
+
+    def test_rejection_round_override_survives_restore_and_resets_after_reopening(self):
+        p=self.payload();a=self.store.save({**p,'status':'面试'});aid=a['id']
+        self.assertEqual(self.store.update_status(aid,'已拒绝')['rejection_stage'],'interview')
+        p.update(status='已拒绝',rejection_stage='later_interview')
+        self.assertEqual(self.store.save(p,aid)['rejection_stage'],'later_interview')
+        del p['rejection_stage']
+        self.assertEqual(self.store.save({**p,'notes':'Keep stage'},aid)['rejection_stage'],'later_interview')
+        self.store.restore(self.store.backup())
+        self.assertEqual(self.store.application(aid)['rejection_stage'],'later_interview')
+        self.store.update_status(aid,'笔试')
+        self.assertEqual(self.store.update_status(aid,'已拒绝')['rejection_stage'],'assessment')
+        for invalid in [['unknown'],'invalid']:
+            with self.assertRaises(ValueError):self.store.save({**p,'rejection_stage':invalid},aid)
+        self.assertEqual(self.store.application(aid)['rejection_stage'],'assessment')
+
     def test_localized_http_csv_and_status_endpoint(self):
         http=s.make_server(self.tmp.name);thread=threading.Thread(target=http.serve_forever,daemon=True);thread.start()
         headers={'X-Archive-Token':http.token,'Content-Type':'application/json'}
@@ -269,8 +297,13 @@ class ArchiveTests(unittest.TestCase):
             post('/api/preferences',{'language':'en'})
             updated=post('/api/applications/'+a['id']+'/status',{'status':'面试'})
             self.assertEqual(updated['jd'],'原始 JD')
+            rejected=post('/api/applications',{**self.payload(),'status':'已拒绝','rejection_stage':'first_interview'})
+            with urlopen(Request(http.origin+'/api/applications',headers=headers)) as response:
+                rows={row['id']:row for row in json.load(response)}
+            self.assertEqual(rows[rejected['id']]['rejection_stage'],'first_interview')
             with urlopen(Request(http.origin+'/api/csv',headers=headers)) as response:csv=response.read().decode('utf-8-sig')
             self.assertIn('Company,Job title,Application URL',csv);self.assertIn('Interview',csv)
+            self.assertIn('Rejection stage',csv);self.assertIn('Rejected after first interview',csv)
             self.assertIn("'=not a formula",csv);self.assertIn('原始 JD',csv)
             with self.assertRaises(HTTPError) as error:post('/api/applications',{})
             self.assertEqual(json.load(error.exception)['error'],'Company and job title are required')
